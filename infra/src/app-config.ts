@@ -5,10 +5,10 @@
 
 /** apps/api の esbuild 出力 dist/<dir>/index.mjs と対応する。 */
 export const HANDLER_DIRS = {
-  api: 'index',
+  api: 'api',
   chatReview: 'chat-review',
   recording: 'recording',
-  cognito: 'cognito',
+  cognito: 'cognito-trigger',
   archiveExpiry: 'archive-expiry',
 } as const;
 export type HandlerName = keyof typeof HANDLER_DIRS;

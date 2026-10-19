@@ -19,7 +19,7 @@ const OUR_FUNCTIONS = ['ApiFunction', 'ChatReviewFunction', 'RecordingFunction',
 function fixtures() {
   const root = mkdtempSync(path.join(tmpdir(), 'infra-test-'));
   const api = path.join(root, 'api');
-  for (const dir of ['index', 'chat-review', 'recording', 'cognito', 'archive-expiry']) {
+  for (const dir of ['api', 'chat-review', 'recording', 'cognito-trigger', 'archive-expiry']) {
     mkdirSync(path.join(api, dir), { recursive: true });
     writeFileSync(path.join(api, dir, 'index.mjs'), 'export const handler = async () => ({});\n');
   }

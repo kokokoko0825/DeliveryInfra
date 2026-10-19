@@ -1,0 +1,22 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "jsx": "react-jsx",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": [
+        "../../apps/web/src/*"
+      ]
+    },
+    "types": [
+      "node"
+    ],
+    "exactOptionalPropertyTypes": false
+  },
+  "include": [
+    "test",
+    "vitest.config.ts"
+  ]
+}

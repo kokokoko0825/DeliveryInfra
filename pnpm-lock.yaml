@@ -241,6 +241,57 @@ importers:
         specifier: ^3.2.4
         version: 3.2.7(@types/node@22.20.5)(jiti@2.7.0)(jsdom@27.4.0(supports-color@7.2.0))(lightningcss@1.32.0)(supports-color@7.2.0)
 
+  tests/integration:
+    devDependencies:
+      '@aws-sdk/client-cognito-identity-provider':
+        specifier: 3.1152.0
+        version: 3.1152.0
+      '@aws-sdk/client-dynamodb':
+        specifier: 3.1152.0
+        version: 3.1152.0
+      '@aws-sdk/client-ivs-realtime':
+        specifier: 3.1152.0
+        version: 3.1152.0
+      '@aws-sdk/client-ivschat':
+        specifier: 3.1152.0
+        version: 3.1152.0
+      '@aws-sdk/client-s3':
+        specifier: 3.1152.0
+        version: 3.1152.0
+      '@aws-sdk/client-ssm':
+        specifier: 3.1152.0
+        version: 3.1152.0
+      '@aws-sdk/lib-dynamodb':
+        specifier: 3.1152.0
+        version: 3.1152.0(@aws-sdk/client-dynamodb@3.1152.0)
+      '@delivery/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+      '@types/node':
+        specifier: ^22.19.0
+        version: 22.20.5
+      aws-cdk-lib:
+        specifier: 2.273.0
+        version: 2.273.0(constructs@10.8.1)
+      aws-jwt-verify:
+        specifier: 5.2.1
+        version: 5.2.1
+      aws-sdk-client-mock:
+        specifier: 4.1.0
+        version: 4.1.0
+      constructs:
+        specifier: 10.8.1
+        version: 10.8.1
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/node@22.20.5)(jiti@2.7.0)(jsdom@27.4.0(supports-color@7.2.0))(lightningcss@1.32.0)(supports-color@7.2.0)
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+
 packages:
 
   '@acemir/cssom@0.9.32':

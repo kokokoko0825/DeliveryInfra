@@ -71,10 +71,10 @@ describe('buildLambdaEnvironment', () => {
 describe('HANDLER_DIRS', () => {
   it('apps/api の dist ディレクトリ名に対応', () =>
     expect(HANDLER_DIRS).toEqual({
-      api: 'index',
+      api: 'api',
       chatReview: 'chat-review',
       recording: 'recording',
-      cognito: 'cognito',
+      cognito: 'cognito-trigger',
       archiveExpiry: 'archive-expiry',
     }));
 });
