@@ -1,8 +1,9 @@
 import { useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { ROLES, type Role } from '@delivery/shared';
-import { Loader2, Trash2, UserPlus } from 'lucide-react';
+import { ROLES, type INVITE_FAILURE_REASONS, type Role, type UserInviteResponse } from '@delivery/shared';
+import { CircleAlert, Loader2, Trash2, UserPlus } from 'lucide-react';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -33,17 +34,40 @@ function RoleSelect({ id, value, onChange, disabled, label }: { id?: string; val
   );
 }
 
+const INVITE_FAILURE_LABELS: Record<(typeof INVITE_FAILURE_REASONS)[number], string> = {
+  ALREADY_EXISTS: 'すでに登録されています',
+  INVALID_PARAMETER: 'メールアドレスが受け付けられませんでした',
+  FAILED: '送信に失敗しました',
+};
+
+function InviteFailures({ failed }: { failed: UserInviteResponse['failed'] }) {
+  return (
+    <Alert variant="destructive">
+      <CircleAlert aria-hidden />
+      <AlertTitle>{failed.length} 件は招待できませんでした</AlertTitle>
+      <AlertDescription>
+        <ul aria-label="招待できなかったアドレス" className="list-inside list-disc">
+          {failed.map((failure) => <li key={failure.email} className="break-all">{failure.email}：{INVITE_FAILURE_LABELS[failure.reason]}</li>)}
+        </ul>
+      </AlertDescription>
+    </Alert>
+  );
+}
+
 function InviteForm() {
   const queryClient = useQueryClient();
   const [text, setText] = useState('');
   const [role, setRole] = useState<Role>('viewer');
   const [error, setError] = useState<string | null>(null);
+  const [failed, setFailed] = useState<UserInviteResponse['failed']>([]);
   const parsed = parseEmailList(text);
   const invite = useMutation({
     mutationFn: () => inviteUsers(parsed.emails, role),
-    onSuccess: (invited) => {
-      toast.success(`${invited.length} 件の招待メールを送信しました`);
-      setText('');
+    onSuccess: (result) => {
+      if (result.invited.length > 0) toast.success(`${result.invited.length} 件の招待メールを送信しました`);
+      // 失敗分だけ入力欄に残し、直して再送できるようにする（R1-11）
+      setFailed(result.failed);
+      setText(result.failed.map((failure) => failure.email).join('\n'));
       return queryClient.invalidateQueries({ queryKey: queryKeys.users });
     },
     onError: (cause) => setError(errorMessage(cause)),
@@ -60,6 +84,7 @@ function InviteForm() {
     if (parsed.invalid.length > 0) { setError(`形式が正しくないメールアドレスがあります: ${parsed.invalid.join(', ')}`); return; }
     if (parsed.emails.length === 0) { setError('メールアドレスを1件以上入力してください'); return; }
     setError(null);
+    setFailed([]);
     invite.mutate();
   };
 
@@ -93,6 +118,7 @@ function InviteForm() {
             </Button>
           </div>
           {error && <ErrorText message={error} />}
+          {failed.length > 0 && <InviteFailures failed={failed} />}
         </form>
       </CardContent>
     </Card>

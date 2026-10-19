@@ -142,6 +142,8 @@ describe('SwitcherPage (A-01)', () => {
     expect(broadcast.options.tracks.map((track) => track.config)).toEqual([{ maxVideoBitrateKbps: 2500, maxFramerate: 30 }, { maxAudioBitrateKbps: 128, stereo: true }]);
     expect(await screen.findByText('LIVE')).toBeInTheDocument();
     expect(await screen.findByText('42人')).toBeInTheDocument();
+    // 3ステージとも1回の応答のトークンを使う（R1-02）
+    expect(api.requestStageTokens).toHaveBeenCalledTimes(1);
   });
 
   it('validates the broadcast title', async () => {
@@ -208,6 +210,8 @@ describe('SwitcherPage (A-01)', () => {
     expect(tile(/^1: カメラ 1/)).toBeDisabled();
     await act(() => vi.advanceTimersByTimeAsync(1000));
     await waitFor(() => expect(sessions.filter((session) => session.token === 'tok-production')).toHaveLength(2));
+    // 取り直すのは再接続したときだけ（R1-02）
+    expect(api.requestStageTokens).toHaveBeenCalledTimes(2);
     vi.useRealTimers();
   });
 });

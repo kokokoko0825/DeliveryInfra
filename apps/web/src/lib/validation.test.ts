@@ -33,6 +33,11 @@ describe('checkComment', () => {
     expect(checkComment('', null, 0)).toEqual({ ok: false, reason: 'empty', message: 'コメントを入力してください' });
     expect(checkComment('   ', null, 0)).toMatchObject({ ok: false, reason: 'empty' });
   });
+  it('uses the shared CommentSchema: rejects control characters (R1-16)', () => {
+    expect(checkComment('a\u0000b', null, 0)).toEqual({ ok: false, reason: 'invalid', message: '制御文字は使用できません' });
+    expect(checkComment('a\u007fb', null, 0)).toMatchObject({ ok: false, reason: 'invalid' });
+    expect(checkComment('\u3000', null, 0)).toMatchObject({ ok: false, reason: 'empty' });
+  });
   it('trims surrounding whitespace before counting', () => {
     expect(checkComment(`  ${'a'.repeat(200)}  `, null, 0)).toEqual({ ok: true, content: 'a'.repeat(200) });
   });

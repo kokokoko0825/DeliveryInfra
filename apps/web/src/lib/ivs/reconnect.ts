@@ -57,4 +57,3 @@ export function createReconnector(connect: () => Promise<void>, scheduler: Sched
     get pending() { return handle !== null; },
   };
 }
-export type Reconnector = ReturnType<typeof createReconnector>;

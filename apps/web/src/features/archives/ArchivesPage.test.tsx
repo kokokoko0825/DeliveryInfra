@@ -18,7 +18,7 @@ vi.mock('sonner', () => ({ toast }));
 const { default: ArchivesPage } = await import('./ArchivesPage');
 const { default: ArchiveDetailPage } = await import('./ArchiveDetailPage');
 
-const archive = (id: string, published = true) => ({ id, title: `録画${id}`, published, durationSeconds: 3725, playbackPath: `/files/archives/${id}/media/hls/multivariant.m3u8` });
+const archive = (id: string, published = true) => ({ id, title: `録画${id}`, published, durationSeconds: 3725, playbackPath: `/files/archives/${id}/media/hls/multivariant.m3u8`, retainUntil: '2027-10-19T00:00:00.000Z' });
 const admin = () => makeAuth({ me: makeMe({ role: 'admin' }) });
 afterEach(() => { vi.unstubAllGlobals(); resetFileCookies(); hls.instances.length = 0; vi.clearAllMocks(); });
 
@@ -31,6 +31,7 @@ describe('ArchivesPage (U-04)', () => {
     expect(screen.getByRole('link', { name: '再生' })).toHaveAttribute('href', '/archives/a1');
     expect(screen.queryByRole('switch')).not.toBeInTheDocument();
     expect(screen.queryByText('公開中')).not.toBeInTheDocument();
+    expect(screen.queryByText(/保存期限/)).not.toBeInTheDocument();
   });
 
   it('shows empty and error states', async () => {
@@ -67,6 +68,24 @@ describe('ArchivesPage (U-04)', () => {
     await waitFor(() => expect(screen.queryByLabelText('タイトル')).not.toBeInTheDocument());
   });
 
+  it('shows the retention date and lets admins extend it with a date input (R1-22)', async () => {
+    const fetchMock = mockApi({ 'GET /api/archives': [archive('a1')], 'PATCH /api/archives/a1': archive('a1') });
+    renderPage(<ArchivesPage />, { auth: admin() });
+    expect(await screen.findByText('保存期限 2027/10/19')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '録画a1 の保存期限を延長' }));
+    const input = await screen.findByLabelText('新しい保存期限');
+    expect(input).toHaveAttribute('type', 'date');
+    expect(input).toHaveValue('2027-10-19');
+    fireEvent.click(screen.getByRole('button', { name: '延長' }));
+    expect(await screen.findByText('2027/10/19 より後の日付を選択してください')).toBeInTheDocument();
+    expect(callsTo(fetchMock, 'PATCH /api/archives/a1')).toHaveLength(0);
+    fireEvent.change(input, { target: { value: '2028-03-31' } });
+    fireEvent.click(screen.getByRole('button', { name: '延長' }));
+    await waitFor(() => expect(bodyOf(callsTo(fetchMock, 'PATCH /api/archives/a1')[0])).toEqual({ retainUntil: '2028-03-31T14:59:59.000Z' }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('保存期限を延長しました'));
+    await waitFor(() => expect(screen.queryByLabelText('新しい保存期限')).not.toBeInTheDocument());
+  });
+
   it('lets admins delete after confirmation and reports errors', async () => {
     const fetchMock = mockApi({ 'GET /api/archives': [archive('a1')], 'DELETE /api/archives/a1': { success: true } });
     renderPage(<ArchivesPage />, { auth: admin() });
@@ -85,11 +104,13 @@ describe('ArchiveDetailPage (U-04)', () => {
   const openDetail = (id = 'a1') => renderPage(<></>, { path: `/archives/${id}`, route: '/none', extraRoutes: <Route path="/archives/:id" element={<ArchiveDetailPage />} /> });
 
   it('plays the API-provided playback path with hls.js and blocks download', async () => {
-    const fetchMock = mockApi({ 'GET /api/archives': [archive('a1')], 'POST /api/files/cookies': {} });
+    const fetchMock = mockApi({ 'GET /api/archives': [archive('a1')], 'POST /api/archives/a1/cookies': {} });
     HTMLMediaElement.prototype.canPlayType = vi.fn((): CanPlayTypeResult => '');
     openDetail();
     const video = await screen.findByLabelText<HTMLVideoElement>('録画a1');
-    expect(callsTo(fetchMock, 'POST /api/files/cookies')).toHaveLength(1);
+    // 当該アーカイブ専用の Cookie だけを取る（R1-08）
+    expect(callsTo(fetchMock, 'POST /api/archives/a1/cookies')).toHaveLength(1);
+    expect(callsTo(fetchMock, 'POST /api/files/cookies')).toHaveLength(0);
     expect(video).toHaveAttribute('controlslist', 'nodownload noremoteplayback');
     const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
     video.dispatchEvent(event);
@@ -109,7 +130,7 @@ describe('ArchiveDetailPage (U-04)', () => {
   });
 
   it('uses native HLS on Safari', async () => {
-    mockApi({ 'GET /api/archives': [archive('a1')], 'POST /api/files/cookies': {} });
+    mockApi({ 'GET /api/archives': [archive('a1')], 'POST /api/archives/a1/cookies': {} });
     HTMLMediaElement.prototype.canPlayType = vi.fn((): CanPlayTypeResult => 'maybe');
     HTMLMediaElement.prototype.load = vi.fn();
     const { unmount } = openDetail();
@@ -121,25 +142,25 @@ describe('ArchiveDetailPage (U-04)', () => {
   });
 
   it('reports unsupported browsers, missing archives and cookie errors', async () => {
-    mockApi({ 'GET /api/archives': [archive('a1')], 'POST /api/files/cookies': {} });
+    mockApi({ 'GET /api/archives': [archive('a1')], 'POST /api/archives/a1/cookies': {} });
     HTMLMediaElement.prototype.canPlayType = vi.fn((): CanPlayTypeResult => '');
     hls.Hls.isSupported.mockReturnValueOnce(false);
     const first = openDetail();
     expect(await screen.findByRole('alert')).toHaveTextContent('このブラウザではアーカイブを再生できません');
     first.unmount();
     resetFileCookies();
-    mockApi({ 'GET /api/archives': [archive('a1')], 'POST /api/files/cookies': apiError(403, 'F', '拒否') });
+    mockApi({ 'GET /api/archives': [archive('a1')], 'POST /api/archives/zz/cookies': apiError(403, 'F', '拒否') });
     const second = openDetail('zz');
     expect(await screen.findByText('アーカイブが見つかりません')).toBeInTheDocument();
     expect(await screen.findByText('再生の準備に失敗しました: 拒否')).toBeInTheDocument();
     second.unmount();
-    mockApi({ 'GET /api/archives': apiError(500, 'X', '一覧失敗'), 'POST /api/files/cookies': {} });
+    mockApi({ 'GET /api/archives': apiError(500, 'X', '一覧失敗'), 'POST /api/archives/a1/cookies': {} });
     openDetail();
     expect(await screen.findByText('一覧失敗')).toBeInTheDocument();
   });
 
   it('destroys hls.js on unmount', async () => {
-    mockApi({ 'GET /api/archives': [archive('a1')], 'POST /api/files/cookies': {} });
+    mockApi({ 'GET /api/archives': [archive('a1')], 'POST /api/archives/a1/cookies': {} });
     HTMLMediaElement.prototype.canPlayType = vi.fn((): CanPlayTypeResult => '');
     const { unmount } = openDetail();
     await waitFor(() => expect(hls.instances).toHaveLength(1));

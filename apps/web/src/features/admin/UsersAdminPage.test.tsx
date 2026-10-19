@@ -29,7 +29,7 @@ describe('UsersAdminPage invite (A-05)', () => {
   });
 
   it('invites multiple addresses with the default viewer role', async () => {
-    const fetchMock = mockApi({ 'GET /api/users': [], 'POST /api/users/invite': ({ body }: { body?: BodyInit | null }) => ({ invited: JSON.parse(String(body)).emails }) });
+    const fetchMock = mockApi({ 'GET /api/users': [], 'POST /api/users/invite': ({ body }: { body?: BodyInit | null }) => ({ invited: JSON.parse(String(body)).emails, failed: [] }) });
     renderPage(<UsersAdminPage />, { auth: admin });
     fireEvent.change(emails(), { target: { value: 'a@example.com, b@example.com' } });
     invite();
@@ -39,7 +39,7 @@ describe('UsersAdminPage invite (A-05)', () => {
   });
 
   it('splits more than 100 addresses into batches', async () => {
-    const fetchMock = mockApi({ 'GET /api/users': [], 'POST /api/users/invite': ({ body }: { body?: BodyInit | null }) => ({ invited: JSON.parse(String(body)).emails }) });
+    const fetchMock = mockApi({ 'GET /api/users': [], 'POST /api/users/invite': ({ body }: { body?: BodyInit | null }) => ({ invited: JSON.parse(String(body)).emails, failed: [] }) });
     renderPage(<UsersAdminPage />, { auth: admin });
     fireEvent.change(emails(), { target: { value: Array.from({ length: 101 }, (_, i) => `u${i}@example.com`).join('\n') } });
     invite();
@@ -61,13 +61,46 @@ describe('UsersAdminPage invite (A-05)', () => {
   });
 
   it('chooses a role for the invitation', async () => {
-    const fetchMock = mockApi({ 'GET /api/users': [], 'POST /api/users/invite': { invited: ['a@example.com'] } });
+    const fetchMock = mockApi({ 'GET /api/users': [], 'POST /api/users/invite': { invited: ['a@example.com'], failed: [] } });
     renderPage(<UsersAdminPage />, { auth: admin });
     fireEvent.change(emails(), { target: { value: 'a@example.com' } });
     fireEvent.keyDown(screen.getByLabelText('ロール'), { key: 'Enter' });
     fireEvent.click(await screen.findByRole('option', { name: 'カメラ担当' }));
     invite();
     await waitFor(() => expect(bodyOf(callsTo(fetchMock, 'POST /api/users/invite')[0])).toEqual({ emails: ['a@example.com'], role: 'camera' }));
+  });
+
+  it('shows partial success: invited count and each failed address with its reason (R1-11)', async () => {
+    mockApi({
+      'GET /api/users': [],
+      'POST /api/users/invite': { invited: ['a@example.com'], failed: [{ email: 'b@example.com', reason: 'ALREADY_EXISTS' }, { email: 'c@example.com', reason: 'FAILED' }] },
+    });
+    renderPage(<UsersAdminPage />, { auth: admin });
+    fireEvent.change(emails(), { target: { value: 'a@example.com\nb@example.com\nc@example.com' } });
+    invite();
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('1 件の招待メールを送信しました'));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('2 件は招待できませんでした');
+    const list = within(alert).getByRole('list', { name: '招待できなかったアドレス' });
+    expect(within(list).getAllByRole('listitem').map((item) => item.textContent)).toEqual(['b@example.com：すでに登録されています', 'c@example.com：送信に失敗しました']);
+    expect(emails()).toHaveValue('b@example.com\nc@example.com');
+  });
+
+  it('keeps earlier batches when a later batch fails (R1-11)', async () => {
+    let call = 0;
+    mockApi({
+      'GET /api/users': [],
+      'POST /api/users/invite': ({ body }: { body?: BodyInit | null }) => {
+        call += 1;
+        return call === 1 ? { invited: JSON.parse(String(body)).emails, failed: [] } : apiError(500, 'X', '失敗');
+      },
+    });
+    renderPage(<UsersAdminPage />, { auth: admin });
+    fireEvent.change(emails(), { target: { value: Array.from({ length: 101 }, (_, i) => `u${i}@example.com`).join('\n') } });
+    invite();
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('100 件の招待メールを送信しました'));
+    expect(await screen.findByRole('alert')).toHaveTextContent('1 件は招待できませんでした');
+    expect(emails()).toHaveValue('u100@example.com');
   });
 
   it('shows invite errors', async () => {

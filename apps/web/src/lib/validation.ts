@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { COMMENT_MAX, COMMENT_RATE_LIMIT_MS, SLIDE_MAX_BYTES } from '@delivery/shared';
+import { COMMENT_MAX, COMMENT_RATE_LIMIT_MS, CommentSchema, SLIDE_MAX_BYTES } from '@delivery/shared';
 
 export const PASSWORD_MIN = 12;
 export const PasswordSchema = z.string()
@@ -20,13 +20,18 @@ export function validateSlideFile(file: FileLike): string | null {
   return null;
 }
 
-export type CommentCheck = { ok: true; content: string } | { ok: false; reason: 'empty' | 'too_long' | 'rate_limited'; message: string };
+export type CommentCheck = { ok: true; content: string } | { ok: false; reason: 'empty' | 'too_long' | 'invalid' | 'rate_limited'; message: string };
 
-/** コメント送信前の検証（1〜200文字、3秒に1回）。 */
+/** コメント送信前の検証。本文はサーバーと同じ shared の CommentSchema（trim・1〜200文字・制御文字不可）、加えて3秒に1回。 */
 export function checkComment(text: string, lastSentAt: number | null, now: number): CommentCheck {
-  const content = text.trim();
-  if (content.length === 0) return { ok: false, reason: 'empty', message: 'コメントを入力してください' };
-  if (content.length > COMMENT_MAX) return { ok: false, reason: 'too_long', message: `${COMMENT_MAX}文字以内で入力してください` };
+  const parsed = CommentSchema.safeParse(text);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    if (issue?.code === 'too_small') return { ok: false, reason: 'empty', message: 'コメントを入力してください' };
+    if (issue?.code === 'too_big') return { ok: false, reason: 'too_long', message: `${COMMENT_MAX}文字以内で入力してください` };
+    return { ok: false, reason: 'invalid', message: issue?.message ?? '送信できない文字が含まれています' };
+  }
+  const content = parsed.data;
   if (lastSentAt !== null && now - lastSentAt < COMMENT_RATE_LIMIT_MS) {
     const seconds = Math.ceil((COMMENT_RATE_LIMIT_MS - (now - lastSentAt)) / 1000);
     return { ok: false, reason: 'rate_limited', message: `連投はできません。${seconds}秒後に送信できます` };

@@ -10,7 +10,7 @@ const sdk = vi.hoisted(() => {
     state = 'disconnected';
     connect = vi.fn(() => { this.state = 'connecting'; });
     disconnect = vi.fn();
-    sendMessage = vi.fn(async () => ({}));
+    sendMessage = vi.fn<(request: unknown) => Promise<object>>(async () => ({}));
     constructor(public config: { regionOrUrl: string; tokenProvider: () => Promise<{ token: string }> }) { FakeChatRoom.instances.push(this); }
     addListener(name: string, listener: Listener) {
       const set = this.listeners.get(name) ?? new Set();
@@ -116,14 +116,17 @@ describe('useChatRoom', () => {
     expect(result.current.comments).toEqual([]);
   });
 
-  it('sends messages with the display name and maps errors', async () => {
+  it('sends messages without client attributes (R1-04) and maps errors', async () => {
     const { result } = renderHook(() => useChatRoom({ enabled: true, region: 'r' }));
-    await expect(result.current.send('x', 'A')).rejects.toThrow('コメントサーバーに接続していません');
+    await expect(result.current.send('x')).rejects.toThrow('コメントサーバーに接続していません');
     act(() => room().emit('connect'));
-    await result.current.send('hello', 'たなか');
-    expect(room().sendMessage).toHaveBeenCalledWith(expect.objectContaining({ content: 'hello', attributes: { displayName: 'たなか' } }));
+    await result.current.send('hello');
+    expect(room().sendMessage).toHaveBeenCalledTimes(1);
+    const request = room().sendMessage.mock.calls[0]?.[0] as InstanceType<typeof sdk.SendMessageRequest>;
+    expect(request).toEqual(new sdk.SendMessageRequest('hello'));
+    expect(request.attributes).toBeUndefined();
     room().sendMessage.mockRejectedValueOnce({ errorCode: 429 });
-    await expect(result.current.send('again', 'たなか')).rejects.toThrow('連投はできません');
+    await expect(result.current.send('again')).rejects.toThrow('連投はできません');
   });
 
   it('forwards custom events and ignores unknown ones', () => {

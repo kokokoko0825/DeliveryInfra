@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { composeFrame, fitFor, sceneLayers } from './compose';
-import { SLIDE, STANDBY, cameraSource, isCamera, sceneEquals, sceneSources, sourceLabel, validatePip, type Scene } from './scene';
+import { SLIDE, STANDBY, cameraSource, isCamera, sceneSources, sourceLabel, validatePip, type Scene } from './scene';
 import { initialSwitcherState, onAirSources, switcherReducer, type SwitcherState } from './state';
 import {
   DEFAULT_TRANSITION_SEC, TRANSITION_LABEL, TRANSITION_MAX_SEC, TRANSITION_MIN_SEC, TransitionDurationSchema, TransitionTypeSchema, ease, transitionProgress,
@@ -66,15 +66,8 @@ describe('scene', () => {
     expect(validatePip(CAM1, { ...pip, sub: SLIDE })).toEqual({ ...pip, sub: SLIDE });
     expect(validatePip(SLIDE, null)).toBeNull();
   });
-  it('compares scenes and lists their sources', () => {
+  it('lists the sources of a scene', () => {
     const a: Scene = { main: SLIDE, pip };
-    expect(sceneEquals(a, { main: SLIDE, pip: { ...pip } })).toBe(true);
-    expect(sceneEquals(a, { main: STANDBY, pip })).toBe(false);
-    expect(sceneEquals(a, { main: SLIDE, pip: null })).toBe(false);
-    expect(sceneEquals(a, { main: SLIDE, pip: { ...pip, sub: CAM2 } })).toBe(false);
-    expect(sceneEquals(a, { main: SLIDE, pip: { ...pip, corner: 'top-left' } })).toBe(false);
-    expect(sceneEquals(a, { main: SLIDE, pip: { ...pip, size: 'large' } })).toBe(false);
-    expect(sceneEquals({ main: SLIDE, pip: null }, { main: SLIDE, pip: null })).toBe(true);
     expect(sceneSources(a)).toEqual([SLIDE, CAM1]);
     expect(sceneSources({ main: CAM2, pip: null })).toEqual([CAM2]);
   });

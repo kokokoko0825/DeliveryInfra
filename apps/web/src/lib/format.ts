@@ -15,8 +15,10 @@ export function formatDuration(totalSeconds: number): string {
 }
 
 const dateTimeFormat = new Intl.DateTimeFormat('ja-JP', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Tokyo' });
+const dateFormat = new Intl.DateTimeFormat('ja-JP', { dateStyle: 'medium', timeZone: 'Asia/Tokyo' });
 const timeFormat = new Intl.DateTimeFormat('ja-JP', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Tokyo' });
 export const formatDateTime = (iso: string) => dateTimeFormat.format(new Date(iso));
+export const formatDate = (iso: string) => dateFormat.format(new Date(iso));
 export const formatTime = (iso: string) => timeFormat.format(new Date(iso));
 
 /** 2026-10-19 → 20261019（ファイル名用） */

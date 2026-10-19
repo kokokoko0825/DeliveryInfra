@@ -47,7 +47,7 @@ export function stageMock(sessions: FakeSession[]) {
 }
 
 export const tokenResponse = (stages: string[], deviceId?: string) => ({
-  tokens: stages.map((stage) => ({ stage, token: `tok-${stage}`, participantId: `p-${stage}`, capabilities: [], expiresAt: '2026-10-19T00:00:00.000Z' })),
+  tokens: stages.map((stage) => ({ stage, token: `tok-${stage}`, participantId: `p-${stage}`, capabilities: [], expiresAt: '2099-01-01T00:00:00.000Z' })),
   ...(deviceId ? { deviceId } : {}),
 });
 

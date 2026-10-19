@@ -23,9 +23,6 @@ export function validatePip(main: SourceId, pip: unknown): PipSettings | null {
   return parsed.data;
 }
 
-export const sceneEquals = (a: Scene, b: Scene) =>
-  a.main === b.main && a.pip?.sub === b.pip?.sub && a.pip?.corner === b.pip?.corner && a.pip?.size === b.pip?.size;
-
 /** シーンが使うソース（メイン・サブ）。 */
 export const sceneSources = (scene: Scene): SourceId[] => (scene.pip ? [scene.main, scene.pip.sub] : [scene.main]);
 

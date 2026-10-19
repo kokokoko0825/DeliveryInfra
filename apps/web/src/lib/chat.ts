@@ -9,6 +9,9 @@ export type ChatConnection = 'connecting' | 'connected' | 'disconnected';
 
 export const isChatEventName = (name: string): name is ChatEventName => (CHAT_EVENTS as readonly string[]).includes(name);
 
+/**
+ * 表示名は審査 Lambda が PROFILE の値で上書きしたメッセージ属性（失敗時は DENY）か、サーバーがトークンに入れた送信者属性だけを使う（Review-1 R1-04）。
+ */
 export function toComment(message: ChatMessage): Comment {
   return {
     messageId: message.id,
@@ -65,7 +68,7 @@ export type ChatRoomState = {
   comments: Comment[];
   connection: ChatConnection;
   capabilities: string[];
-  send: (content: string, displayName: string) => Promise<void>;
+  send: (content: string) => Promise<void>;
   remove: (messageId: string) => void;
 };
 
@@ -121,11 +124,12 @@ export function useChatRoom({ enabled, region, onEvent, onServerDisconnect }: Us
     };
   }, [enabled, region]);
 
-  const send = useCallback(async (content: string, displayName: string) => {
+  const send = useCallback(async (content: string) => {
     const room = roomRef.current;
     if (!room || room.state !== 'connected') throw new Error('コメントサーバーに接続していません');
     try {
-      await room.sendMessage(new SendMessageRequest(content, { displayName }));
+      // 表示名はサーバーが付けるので、クライアントからは属性を送らない（R1-04）
+      await room.sendMessage(new SendMessageRequest(content));
     } catch (error) {
       throw new Error(chatErrorMessage(error));
     }

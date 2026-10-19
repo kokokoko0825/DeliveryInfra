@@ -78,6 +78,20 @@ describe('useStageSender', () => {
     expect(api.sendHeartbeat).toHaveBeenLastCalledWith('dev-2');
   });
 
+  it('waits for the old slot to be released before requesting a new token (R1-17)', async () => {
+    let finishRelease: () => void = () => undefined;
+    api.releaseDevice.mockReset().mockImplementation(() => new Promise<void>((resolve) => { finishRelease = resolve; }));
+    const { result } = renderHook(() => useStageSender('camera'));
+    await act(() => result.current.start(tracks, 'CAM1'));
+    act(() => sessions[0]?.handlers.onRecoverableLoss?.('errored'));
+    await act(() => vi.advanceTimersByTimeAsync(1000));
+    expect(api.releaseDevice).toHaveBeenCalledWith('dev-1');
+    expect(api.requestStageTokens).toHaveBeenCalledTimes(1);
+    await act(async () => finishRelease());
+    expect(api.requestStageTokens).toHaveBeenCalledTimes(2);
+    expect(result.current.state.status).toBe('live');
+  });
+
   it('keeps retrying while the slot is still taken during reconnection', async () => {
     api.requestStageTokens.mockReset()
       .mockResolvedValueOnce(tokenResponse(['production'], 'dev-1'))

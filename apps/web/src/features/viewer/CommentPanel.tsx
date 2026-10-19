@@ -108,7 +108,7 @@ export function CommentPanel({ moderation, className }: Props) {
     setError(null);
     setSending(true);
     try {
-      await send(result.content, me?.displayName ?? '');
+      await send(result.content);
       lastSentAt.current = now;
       setText('');
     } catch (cause) {

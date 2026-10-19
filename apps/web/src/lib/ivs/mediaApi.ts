@@ -18,6 +18,37 @@ export function tokenFor(response: StageTokenResponse, stage: StageName): string
   return found.token;
 }
 
+/** 期限まで残りがこれ未満のトークンは使わずに取り直す。 */
+export const TOKEN_REFRESH_MARGIN_MS = 60_000;
+
+/**
+ * スイッチャー用トークンの取得元（Review-1 R1-02）。
+ * purpose=switcher の1回の応答に production/slide/broadcast の3本が入るので、それを各ステージで1回ずつ使う。
+ * 同じステージが再度求めたとき（再接続）か、期限が近いときだけ取り直す。
+ */
+export function createSwitcherTokens(request: () => Promise<StageTokenResponse>, now: () => number = Date.now) {
+  let pending: Promise<StageTokenResponse> | null = null;
+  const used = new Set<StageName>();
+  const refresh = () => {
+    used.clear();
+    const next = request();
+    pending = next;
+    // 失敗した応答は次回に取り直す
+    next.catch(() => { if (pending === next) pending = null; });
+    return next;
+  };
+  return async (stage: StageName): Promise<string> => {
+    let response = await (pending && !used.has(stage) ? pending : refresh());
+    const fresh = (r: StageTokenResponse) => {
+      const expiresAt = r.tokens.find((token) => token.stage === stage)?.expiresAt;
+      return expiresAt === undefined || Date.parse(expiresAt) - now() >= TOKEN_REFRESH_MARGIN_MS;
+    };
+    if (!fresh(response)) response = await refresh();
+    used.add(stage);
+    return tokenFor(response, stage);
+  };
+}
+
 export const sendHeartbeat = (deviceId: string) =>
   apiFetch(`/devices/${encodeURIComponent(deviceId)}/heartbeat`, { method: 'POST', body: {}, schema: HeartbeatResponseSchema });
 

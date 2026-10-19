@@ -56,4 +56,3 @@ export function createVideoRegistry() {
     },
   };
 }
-export type VideoRegistry = ReturnType<typeof createVideoRegistry>;

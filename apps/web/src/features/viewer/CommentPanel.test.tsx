@@ -42,13 +42,13 @@ describe('CommentPanel', () => {
     expect(screen.getByText('まだコメントはありません')).toBeInTheDocument();
   });
 
-  it('sends 200 characters with the display name and clears the input', async () => {
+  it('sends 200 characters without a client display name (R1-04) and clears the input', async () => {
     const chat = makeChat();
     renderPage(<CommentPanel />, { chat, auth: makeAuth({ me: makeMe({ displayName: 'たなか' }) }) });
     fireEvent.change(input(), { target: { value: 'あ'.repeat(200) } });
     expect(screen.getByText('200 / 200 文字・3秒に1回まで')).toBeInTheDocument();
     submit();
-    await waitFor(() => expect(chat.send).toHaveBeenCalledWith('あ'.repeat(200), 'たなか'));
+    await waitFor(() => expect(chat.send).toHaveBeenCalledWith('あ'.repeat(200)));
     await waitFor(() => expect(input()).toHaveValue(''));
   });
 
@@ -63,6 +63,9 @@ describe('CommentPanel', () => {
     fireEvent.change(input(), { target: { value: '  ' } });
     submit();
     expect(await screen.findByRole('alert')).toHaveTextContent('コメントを入力してください');
+    fireEvent.change(input(), { target: { value: 'a\u0007b' } });
+    submit();
+    expect(await screen.findByRole('alert')).toHaveTextContent('制御文字は使用できません');
     expect(chat.send).not.toHaveBeenCalled();
   });
 

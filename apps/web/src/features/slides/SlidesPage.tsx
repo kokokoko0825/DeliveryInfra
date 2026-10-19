@@ -8,7 +8,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { PageHeader } from '@/components/app/PageHeader';
 import { ErrorText, LoadingView } from '@/components/app/StatusView';
 import { errorMessage } from '@/lib/api';
-import { slideFileUrl, useFileCookies } from '@/lib/files';
+import { SLIDE_COOKIES_PATH, slideFileUrl, useFileCookies } from '@/lib/files';
 import { formatBytes } from '@/lib/format';
 import { queryKeys } from '@/lib/query-keys';
 import { fetchSlides } from './api';
@@ -40,7 +40,7 @@ function SlideViewer({ slide, onClose }: { slide: Slide | null; onClose: () => v
 /** U-02 スライド一覧。追加・削除は Chat の slides-updated で即時に再取得される。 */
 export default function SlidesPage() {
   const slides = useQuery({ queryKey: queryKeys.slides, queryFn: fetchSlides });
-  const cookies = useFileCookies();
+  const cookies = useFileCookies(SLIDE_COOKIES_PATH);
   const [viewing, setViewing] = useState<Slide | null>(null);
 
   return (

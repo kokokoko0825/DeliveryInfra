@@ -1,4 +1,4 @@
-import { EmptyResponseSchema, UserInviteResponseSchema, UserUpdateResponseSchema, UsersResponseSchema, type Role } from '@delivery/shared';
+import { EmptyResponseSchema, UserInviteResponseSchema, UserUpdateResponseSchema, UsersResponseSchema, type Role, type UserInviteResponse } from '@delivery/shared';
 import { apiFetch } from '@/lib/api';
 import { chunk } from '@/lib/validation';
 
@@ -7,14 +7,28 @@ const userPath = (userId: string) => `/users/${encodeURIComponent(userId)}`;
 
 export const fetchUsers = () => apiFetch('/users', { schema: UsersResponseSchema });
 
-/** 招待 API は 1 回 100 件までなので分割して順に送る。 */
-export async function inviteUsers(emails: readonly string[], role: Role): Promise<string[]> {
-  const invited: string[] = [];
+/**
+ * 招待 API は 1 回 100 件までなので分割して順に送り、部分成功（invited / failed）をまとめる（Review-1 R1-11）。
+ * 途中のバッチが丸ごと失敗したらその分を failed に入れて続ける。全バッチが失敗したときだけ例外を投げる。
+ */
+export async function inviteUsers(emails: readonly string[], role: Role): Promise<UserInviteResponse> {
+  const result: UserInviteResponse = { invited: [], failed: [] };
+  let answered = false;
+  let lastError: unknown = null;
   for (const batch of chunk(emails, INVITE_BATCH)) {
-    const response = await apiFetch('/users/invite', { method: 'POST', body: { emails: batch, role }, schema: UserInviteResponseSchema });
-    invited.push(...response.invited);
+    try {
+      const response = await apiFetch('/users/invite', { method: 'POST', body: { emails: batch, role }, schema: UserInviteResponseSchema });
+      result.invited.push(...response.invited);
+      result.failed.push(...response.failed);
+      answered = true;
+    } catch (error) {
+      lastError = error;
+      result.failed.push(...batch.map((email) => ({ email, reason: 'FAILED' as const })));
+    }
   }
-  return invited;
+  // 1回も応答が無ければエラー内容をそのまま見せる
+  if (!answered && lastError !== null) throw lastError;
+  return result;
 }
 
 export const changeRole = (userId: string, role: Role) =>

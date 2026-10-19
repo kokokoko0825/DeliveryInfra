@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import type { StageName } from '@delivery/shared';
 import { createManagedSession, type ManagedSession, type ManagedStatus } from '@/lib/ivs/managedSession';
-import { requestStageTokens, tokenFor } from '@/lib/ivs/mediaApi';
+import { createSwitcherTokens, requestStageTokens } from '@/lib/ivs/mediaApi';
 import { bitrateKbps, sumOutboundBytes, type ByteSample } from '@/lib/ivs/stats';
 import { holdWakeLock } from '@/lib/ivs/wakeLock';
 import { composeFrame } from './engine/compose';
@@ -26,8 +26,6 @@ export const BROADCAST_AUDIO = { maxAudioBitrateKbps: 128, stereo: true } as con
 export type StageStatuses = Record<StageName, ManagedStatus>;
 export type Levels = { channels: Map<ChannelId, number>; master: number };
 
-const switcherToken = (stage: StageName) => async () => tokenFor(await requestStageTokens('switcher'), stage);
-
 /**
  * スイッチング画面の中核。制作用・スライド用ステージを受信し、Canvas 合成 + WebAudio ミックスを配信用ステージへ送る。
  * 判断は engine/ の純粋関数に任せ、ここは配線だけを行う。
@@ -46,6 +44,7 @@ export function useSwitcher() {
   const [standbyImage, setStandbyImage] = useState<Drawable | null>(null);
 
   const registry = useMemo(() => createVideoRegistry(), []);
+  const switcherToken = useMemo(() => createSwitcherTokens(() => requestStageTokens('switcher')), []);
   const graph = useRef<AudioGraph | null>(null);
   const sessions = useRef<Partial<Record<StageName, ManagedSession>>>({});
   const programTrack = useRef<MediaStreamTrack | null>(null);
@@ -140,7 +139,7 @@ export function useSwitcher() {
   useEffect(() => (running ? holdWakeLock() : undefined), [running]);
 
   const receive = useCallback((stage: ReceiveStage) => createManagedSession({
-    fetchToken: switcherToken(stage),
+    fetchToken: () => switcherToken(stage),
     publish: false,
     subscribe: true,
     onStatus: (status) => setStatus(stage, status),
@@ -150,7 +149,7 @@ export function useSwitcher() {
       onStreamsRemoved: (participant, tracks) => remoteDispatch({ type: 'STREAMS_REMOVED', participantId: participant.id, tracks }),
       onParticipantLeft: (participant) => remoteDispatch({ type: 'LEFT', participantId: participant.id }),
     },
-  }), [setStatus]);
+  }), [setStatus, switcherToken]);
 
   /** 起動: 音声の再生許可が要るため、ボタン操作から呼ぶ。 */
   const start = useCallback(async () => {
@@ -186,7 +185,7 @@ export function useSwitcher() {
     programTrack.current = video;
     if (!video) throw new Error('番組映像を取得できませんでした');
     const tracks = [{ track: video, config: BROADCAST_VIDEO }, ...(audio ? [{ track: audio, config: BROADCAST_AUDIO }] : [])];
-    const broadcast = createManagedSession({ fetchToken: switcherToken('broadcast'), publish: true, subscribe: false, tracks, onStatus: (status) => setStatus('broadcast', status) });
+    const broadcast = createManagedSession({ fetchToken: () => switcherToken('broadcast'), publish: true, subscribe: false, tracks, onStatus: (status) => setStatus('broadcast', status) });
     sessions.current.broadcast = broadcast;
     try {
       await broadcast.start();
@@ -195,7 +194,7 @@ export function useSwitcher() {
       stopPublishing();
       throw error;
     }
-  }, [setStatus, stopPublishing]);
+  }, [setStatus, stopPublishing, switcherToken]);
 
   useEffect(() => () => {
     Object.values(sessions.current).forEach((session) => session?.stop());
@@ -211,4 +210,3 @@ export function useSwitcher() {
     standbyImage, setStandbyImage, programCanvas, previewCanvas, registry, start, startPublishing, stopPublishing,
   };
 }
-export type SwitcherController = ReturnType<typeof useSwitcher>;

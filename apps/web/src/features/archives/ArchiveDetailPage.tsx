@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { PageHeader } from '@/components/app/PageHeader';
 import { ErrorText, LoadingView } from '@/components/app/StatusView';
 import { errorMessage } from '@/lib/api';
-import { useFileCookies } from '@/lib/files';
+import { archiveCookiesPath, useFileCookies } from '@/lib/files';
 import { formatDuration } from '@/lib/format';
 import { queryKeys } from '@/lib/query-keys';
 import { fetchArchives } from './api';
@@ -13,9 +13,10 @@ import { HlsPlayer } from './HlsPlayer';
 
 /** U-04 アーカイブ再生。playbackPath は API が返すパスをそのまま使う。 */
 export default function ArchiveDetailPage() {
-  const { id } = useParams();
+  const { id = '' } = useParams();
   const archives = useQuery({ queryKey: queryKeys.archives, queryFn: fetchArchives });
-  const cookies = useFileCookies();
+  // Cookie はこのアーカイブのプレフィックスだけに効く（非公開なら admin 以外は 403。R1-08）
+  const cookies = useFileCookies(archiveCookiesPath(id));
   const archive = archives.data?.find((item) => item.id === id);
 
   return (

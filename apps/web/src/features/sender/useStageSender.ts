@@ -26,10 +26,11 @@ export function useStageSender(purpose: SenderPurpose) {
     if (heartbeat.current) clearInterval(heartbeat.current);
     heartbeat.current = null;
   }, []);
-  const release = useCallback(() => {
+  /** 枠を返す。失敗しても失効で回収されるので握りつぶす。 */
+  const release = useCallback(async () => {
     const id = deviceId.current;
     deviceId.current = undefined;
-    if (id) releaseDevice(id).catch(() => undefined);
+    if (id) await releaseDevice(id).catch(() => undefined);
   }, []);
 
   const startHeartbeat = useCallback(() => {
@@ -52,8 +53,8 @@ export function useStageSender(purpose: SenderPurpose) {
       subscribe: false,
       tracks,
       fetchToken: async () => {
-        // 再接続時は前の枠を先に返す（失効待ちで上限に当たらないように）
-        release();
+        // 再接続時は前の枠を返し終えてから取り直す（上限ちょうどのとき 409 にならないように）
+        await release();
         const response = await requestStageTokens(purpose, deviceName);
         deviceId.current = response.deviceId;
         return tokenFor(response, STAGE_OF[purpose]);
@@ -76,7 +77,7 @@ export function useStageSender(purpose: SenderPurpose) {
       // 初回の失敗（台数上限・権限など）は自動再試行せずに表示する
       session.stop();
       stopHeartbeat();
-      release();
+      void release();
       dispatch({ type: 'FAILED', error: classifyError(error) });
     }
   }, [purpose, release, startHeartbeat, stopHeartbeat]);
@@ -85,7 +86,7 @@ export function useStageSender(purpose: SenderPurpose) {
     managed.current?.stop();
     managed.current = null;
     stopHeartbeat();
-    release();
+    void release();
     dispatch({ type: 'STOPPED' });
   }, [release, stopHeartbeat]);
 
@@ -96,13 +97,14 @@ export function useStageSender(purpose: SenderPurpose) {
   const active = isActive(state.status);
   useEffect(() => (active ? holdWakeLock() : undefined), [active]);
   useEffect(() => {
-    window.addEventListener('pagehide', release);
-    return () => window.removeEventListener('pagehide', release);
+    const onPageHide = () => void release();
+    window.addEventListener('pagehide', onPageHide);
+    return () => window.removeEventListener('pagehide', onPageHide);
   }, [release]);
   useEffect(() => () => {
     managed.current?.stop();
     stopHeartbeat();
-    release();
+    void release();
   }, [release, stopHeartbeat]);
 
   return { state, start, stop, updateTracks, setMuted };

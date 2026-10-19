@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadRuntimeConfig, resetRuntimeConfigCache } from './config';
-import { ensureFileCookies, resetFileCookies, slideFileUrl, COOKIE_REFRESH_MS } from './files';
+import { archiveCookiesPath, ensureFileCookies, resetFileCookies, slideFileUrl, COOKIE_REFRESH_MS, SLIDE_COOKIES_PATH } from './files';
 
 const config = { region: 'ap-northeast-1', userPoolId: 'pool', userPoolClientId: 'client' };
 afterEach(() => { vi.unstubAllGlobals(); resetRuntimeConfigCache(); resetFileCookies(); });
@@ -38,15 +38,15 @@ describe('ensureFileCookies', () => {
     vi.stubGlobal('fetch', fetchMock);
     let now = 1_000;
     const clock = () => now;
-    await Promise.all([ensureFileCookies(clock), ensureFileCookies(clock)]);
+    await Promise.all([ensureFileCookies(SLIDE_COOKIES_PATH, clock), ensureFileCookies(SLIDE_COOKIES_PATH, clock)]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/files/cookies');
     expect((fetchMock.mock.calls[0]?.[1] as RequestInit)).toMatchObject({ method: 'POST', credentials: 'same-origin' });
     now += COOKIE_REFRESH_MS - 1;
-    await ensureFileCookies(clock);
+    await ensureFileCookies(SLIDE_COOKIES_PATH, clock);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     now += 1;
-    await ensureFileCookies(clock);
+    await ensureFileCookies(SLIDE_COOKIES_PATH, clock);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(COOKIE_REFRESH_MS).toBe(3_000_000);
   });
@@ -55,9 +55,19 @@ describe('ensureFileCookies', () => {
       .mockResolvedValueOnce(new Response('{"error":{"code":"X","message":"失敗"}}', { status: 500 }))
       .mockResolvedValueOnce(new Response('{}'));
     vi.stubGlobal('fetch', fetchMock);
-    await expect(ensureFileCookies()).rejects.toThrow('X: 失敗');
-    await expect(ensureFileCookies()).resolves.toBeUndefined();
+    await expect(ensureFileCookies(SLIDE_COOKIES_PATH)).rejects.toThrow('X: 失敗');
+    await expect(ensureFileCookies(SLIDE_COOKIES_PATH)).resolves.toBeUndefined();
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+  it('issues archive cookies per archive, separately from slide cookies (R1-08)', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => new Response('{"success":true}'));
+    vi.stubGlobal('fetch', fetchMock);
+    await ensureFileCookies(SLIDE_COOKIES_PATH);
+    await ensureFileCookies(archiveCookiesPath('a/1'));
+    await ensureFileCookies(archiveCookiesPath('a/1'));
+    await ensureFileCookies(archiveCookiesPath('b'));
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual(['/api/files/cookies', '/api/archives/a%2F1/cookies', '/api/archives/b/cookies']);
+    expect(fetchMock.mock.calls.every((call) => (call[1] as RequestInit).method === 'POST')).toBe(true);
   });
   it('builds slide URLs', () => {
     expect(slideFileUrl('a b')).toBe('/files/slides/a%20b.pdf');

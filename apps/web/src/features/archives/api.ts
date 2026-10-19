@@ -2,7 +2,7 @@ import { ArchiveUpdateResponseSchema, ArchivesResponseSchema, EmptyResponseSchem
 import { apiFetch } from '@/lib/api';
 
 export const fetchArchives = () => apiFetch('/archives', { schema: ArchivesResponseSchema });
-export const updateArchive = (id: string, body: { title?: string; published?: boolean }) =>
+export const updateArchive = (id: string, body: { title?: string; published?: boolean; retainUntil?: string }) =>
   apiFetch(`/archives/${encodeURIComponent(id)}`, { method: 'PATCH', body, schema: ArchiveUpdateResponseSchema });
 export const deleteArchive = (id: string) =>
   apiFetch(`/archives/${encodeURIComponent(id)}`, { method: 'DELETE', schema: EmptyResponseSchema });
