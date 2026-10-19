@@ -1,26 +1,60 @@
-import { Link, Navigate, Route, Routes } from 'react-router';
+import { Navigate, Route, Routes } from 'react-router';
+import type { Feature } from '@delivery/shared';
+import { getPostLoginPath } from '@delivery/shared';
+import { lazy, Suspense, type ReactNode } from 'react';
 import LoginPage from './features/auth/LoginPage';
 import PasswordPage from './features/auth/PasswordPage';
 import DisplayNamePage from './features/auth/DisplayNamePage';
-import WatchPage from './features/viewer/WatchPage';
-import SlidesPage from './features/slides/SlidesPage';
-import ArchivesPage from './features/archives/ArchivesPage';
-import ArchiveDetailPage from './features/archives/ArchiveDetailPage';
-import CameraSendPage from './features/sender/CameraSendPage';
-import MicSendPage from './features/sender/MicSendPage';
-import SlideSharePage from './features/sender/SlideSharePage';
-import SwitcherPage from './features/switcher/SwitcherPage';
-import SlidesAdminPage from './features/admin/SlidesAdminPage';
-import CommentsAdminPage from './features/admin/CommentsAdminPage';
-import UsersAdminPage from './features/admin/UsersAdminPage';
+import { RequireAuth } from './features/auth/RequireAuth';
+import { useAuth } from './features/auth/auth-context';
+import { AppLayout } from './components/app/AppLayout';
+import { LoadingView } from './components/app/StatusView';
 
-const links = [['/watch', '視聴'], ['/slides', 'スライド'], ['/archives', 'アーカイブ'], ['/admin/switcher', 'スイッチング']] as const;
+// 画面ごとに分割して読み込む（視聴者のスマホで送信・スイッチング用 SDK を読まないため）
+const WatchPage = lazy(() => import('./features/viewer/WatchPage'));
+const SlidesPage = lazy(() => import('./features/slides/SlidesPage'));
+const ArchivesPage = lazy(() => import('./features/archives/ArchivesPage'));
+const ArchiveDetailPage = lazy(() => import('./features/archives/ArchiveDetailPage'));
+const CameraSendPage = lazy(() => import('./features/sender/CameraSendPage'));
+const MicSendPage = lazy(() => import('./features/sender/MicSendPage'));
+const SlideSharePage = lazy(() => import('./features/sender/SlideSharePage'));
+const SwitcherPage = lazy(() => import('./features/switcher/SwitcherPage'));
+const SlidesAdminPage = lazy(() => import('./features/admin/SlidesAdminPage'));
+const CommentsAdminPage = lazy(() => import('./features/admin/CommentsAdminPage'));
+const UsersAdminPage = lazy(() => import('./features/admin/UsersAdminPage'));
+
+const guarded = (feature: Feature, element: ReactNode) => (
+  <RequireAuth feature={feature}><Suspense fallback={<LoadingView />}>{element}</Suspense></RequireAuth>
+);
+
+function Home() {
+  const { me } = useAuth();
+  return <Navigate to={me ? getPostLoginPath(me.role) : '/login'} replace />;
+}
+
 export function App() {
-  return <div className="min-h-screen bg-background text-foreground"><header className="border-b border-border px-6 py-3"><nav className="mx-auto flex max-w-6xl flex-wrap gap-3" aria-label="メインメニュー">{links.map(([to, label]) => <Link className="inline-flex items-center px-3" key={to} to={to}>{label}</Link>)}</nav></header><div className="mx-auto max-w-6xl p-6"><Routes>
-    <Route path="/" element={<Navigate to="/watch" replace />} /><Route path="/login" element={<LoginPage />} /><Route path="/password" element={<PasswordPage />} /><Route path="/display-name" element={<DisplayNamePage />} />
-    <Route path="/watch" element={<WatchPage />} /><Route path="/slides" element={<SlidesPage />} /><Route path="/archives" element={<ArchivesPage />} /><Route path="/archives/:id" element={<ArchiveDetailPage />} />
-    <Route path="/send/camera" element={<CameraSendPage />} /><Route path="/send/mic" element={<MicSendPage />} /><Route path="/send/slide" element={<SlideSharePage />} />
-    <Route path="/admin/switcher" element={<SwitcherPage />} /><Route path="/admin/slides" element={<SlidesAdminPage />} /><Route path="/admin/comments" element={<CommentsAdminPage />} /><Route path="/admin/users" element={<UsersAdminPage />} />
-    <Route path="*" element={<main><h1>ページが見つかりません</h1></main>} />
-  </Routes></div></div>;
+  return (
+    <Routes>
+      <Route path="/login" element={<LoginPage />} />
+      <Route path="/password" element={<PasswordPage />} />
+      <Route path="/display-name" element={<RequireAuth requireDisplayName={false}><DisplayNamePage /></RequireAuth>} />
+      <Route element={<RequireAuth />}>
+        <Route element={<AppLayout />}>
+          <Route index element={<Home />} />
+          <Route path="/watch" element={guarded('watch', <WatchPage />)} />
+          <Route path="/slides" element={guarded('watch', <SlidesPage />)} />
+          <Route path="/archives" element={guarded('archives', <ArchivesPage />)} />
+          <Route path="/archives/:id" element={guarded('archives', <ArchiveDetailPage />)} />
+          <Route path="/send/camera" element={guarded('cameraSend', <CameraSendPage />)} />
+          <Route path="/send/mic" element={guarded('micSend', <MicSendPage />)} />
+          <Route path="/send/slide" element={guarded('slideShare', <SlideSharePage />)} />
+          <Route path="/admin/switcher" element={guarded('switcher', <SwitcherPage />)} />
+          <Route path="/admin/slides" element={guarded('slideManage', <SlidesAdminPage />)} />
+          <Route path="/admin/comments" element={guarded('commentModeration', <CommentsAdminPage />)} />
+          <Route path="/admin/users" element={guarded('userManage', <UsersAdminPage />)} />
+          <Route path="*" element={<section className="py-16 text-center"><h1 className="text-xl font-semibold">ページが見つかりません</h1></section>} />
+        </Route>
+      </Route>
+    </Routes>
+  );
 }

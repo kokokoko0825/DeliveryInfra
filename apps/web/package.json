@@ -9,7 +9,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
     "test": "vitest run",
-    "mutation": "echo 'No mutation targets'"
+    "mutation": "stryker run stryker.core.config.json && stryker run stryker.media.config.json"
   },
   "dependencies": {
     "@delivery/shared": "workspace:*",
