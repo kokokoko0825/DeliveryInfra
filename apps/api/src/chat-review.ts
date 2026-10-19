@@ -1,8 +1,9 @@
-import { GetCommand, PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { GetCommand, PutCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
 import { CommentSchema, containsNgWord } from '@delivery/shared';
 import { createClients } from './aws';
 import { getChatReviewEnv, type ChatReviewEnv } from './env';
 import type { Clients } from './aws';
+import { KEYS, makeDatabase } from './database';
 
 export interface ChatReviewEvent {
   MessageId: string;
@@ -20,17 +21,12 @@ export function createChatReviewHandler(dependencies?: { env?: ChatReviewEnv; cl
     catch (error) { return deny(event.Content ?? '', error instanceof Error ? error.message : 'コメントは1〜200文字で入力してください'); }
     const env = dependencies?.env ?? getChatReviewEnv();
     const clients = dependencies?.clients ?? createClients(env);
-    const profile = await clients.ddb.send(new GetCommand({ TableName: env.TABLE_NAME, Key: { PK: `USER#${event.Sender.UserId}`, SK: 'PROFILE' }, ConsistentRead: true }));
+    const profile = await clients.ddb.send(new GetCommand({ TableName: env.TABLE_NAME, Key: { PK: KEYS.user(event.Sender.UserId), SK: 'PROFILE' }, ConsistentRead: true }));
     const profileItem = profile.Item as { displayName?: string; commentSuspended?: boolean } | undefined;
     if (!profileItem?.displayName) return deny(content, '表示名を設定してください');
     if (profileItem.commentSuspended) return deny(content, 'コメントの送信が停止されています');
-    const words: string[] = [];
-    let ExclusiveStartKey: Record<string, unknown> | undefined;
-    do {
-      const wordsPage = await clients.ddb.send(new ScanCommand({ TableName: env.TABLE_NAME, FilterExpression: 'begins_with(PK, :prefix)', ExpressionAttributeValues: { ':prefix': 'NGWORD#' }, ConsistentRead: true, ExclusiveStartKey }));
-      words.push(...((wordsPage.Items as { word?: string }[] | undefined)?.flatMap((item) => item.word ? [item.word] : []) ?? []));
-      ExclusiveStartKey = wordsPage.LastEvaluatedKey;
-    } while (ExclusiveStartKey);
+    // NG ワードは固定 PK の Query で読む（R1-10）。追加直後から効くよう強整合読み込み
+    const words = (await makeDatabase(clients.ddb, env).query<{ PK: string; SK: string; word?: string }>(KEYS.ngWordPk, { consistentRead: true })).flatMap((item) => item.word ? [item.word] : []);
     if (containsNgWord(content, words)) return deny(content, '使用できない単語が含まれています');
 
     const now = dependencies?.now?.() ?? Date.now();
@@ -38,7 +34,7 @@ export function createChatReviewHandler(dependencies?: { env?: ChatReviewEnv; cl
     try {
       await clients.ddb.send(new PutCommand({
         TableName: env.TABLE_NAME,
-        Item: { PK: `USER#${event.Sender.UserId}`, SK: 'CHAT_RATE', lastSentAt: now, ttl: nowSeconds + 60 },
+        Item: { PK: KEYS.user(event.Sender.UserId), SK: 'CHAT_RATE', lastSentAt: now, ttl: nowSeconds + 60 },
         ConditionExpression: 'attribute_not_exists(PK) OR #lastSentAt <= :cutoff',
         ExpressionAttributeNames: { '#lastSentAt': 'lastSentAt' }, ExpressionAttributeValues: { ':cutoff': now - 3000 },
       }));
@@ -46,15 +42,20 @@ export function createChatReviewHandler(dependencies?: { env?: ChatReviewEnv; cl
       if ((error as { name?: string }).name === 'ConditionalCheckFailedException') return deny(content, 'コメントは3秒に1回まで送信できます');
       throw error;
     }
-    await clients.ddb.send(new PutCommand({
-      TableName: env.TABLE_NAME,
-      Item: {
-        PK: `COMMENT#${event.MessageId}`, SK: 'ITEM', messageId: event.MessageId,
+    const sentAt = new Date(now).toISOString();
+    const ttl = nowSeconds + 365 * 24 * 60 * 60;
+    const commentSk = KEYS.commentSk(sentAt, event.MessageId);
+    // 本体（時刻順 Query 用）と messageId → SK の参照行を同時に書く（R1-10、GSI なし）
+    await clients.ddb.send(new TransactWriteCommand({ TransactItems: [
+      { Put: { TableName: env.TABLE_NAME, Item: {
+        PK: KEYS.commentPk, SK: commentSk, messageId: event.MessageId,
         userId: event.Sender.UserId, displayName: profileItem.displayName, comment: content,
-        sentAt: new Date(now).toISOString(), deleted: false, ttl: nowSeconds + 365 * 24 * 60 * 60,
-      },
-    }));
-    return { Content: content, ReviewResult: 'ALLOW', ...(event.Attributes ? { Attributes: event.Attributes } : {}) };
+        sentAt, deleted: false, ttl,
+      } } },
+      { Put: { TableName: env.TABLE_NAME, Item: { PK: KEYS.commentRef(event.MessageId), SK: 'REF', commentSk, ttl } } },
+    ] }));
+    // クライアント指定の属性は捨て、保存済みの表示名で上書きする（R1-04 なりすまし対策）
+    return { Content: content, ReviewResult: 'ALLOW', Attributes: { displayName: profileItem.displayName } };
   };
 }
 

@@ -7,7 +7,6 @@ const CommonEnvSchema = z.object({
 const CloudFrontKeyEnvSchema = z.object({
   CLOUDFRONT_KEY_PAIR_ID: z.string().min(1),
   CLOUDFRONT_PRIVATE_KEY_PARAMETER: z.string().min(1),
-  CLOUDFRONT_KEY_GROUP_ID: z.string().min(1).optional(),
 });
 
 export const ApiEnvSchema = CommonEnvSchema.extend({
@@ -21,12 +20,13 @@ export const RecordingEnvSchema = CommonEnvSchema.extend({
   TABLE_NAME: z.string().min(1), RECORDING_BUCKET: z.string().min(1), CHAT_ROOM_ARN: z.string().min(1), STAGE_BROADCAST_ARN: z.string().min(1),
 });
 export const CognitoEnvSchema = CommonEnvSchema.extend({ TABLE_NAME: z.string().min(1) });
+export const ArchiveExpiryEnvSchema = CommonEnvSchema.extend({ RECORDING_BUCKET: z.string().min(1) });
 
 export type Env = z.infer<typeof ApiEnvSchema>;
-export type ApiEnv = Env;
 export type ChatReviewEnv = z.infer<typeof ChatReviewEnvSchema>;
 export type RecordingEnv = z.infer<typeof RecordingEnvSchema>;
 export type CognitoEnv = z.infer<typeof CognitoEnvSchema>;
+export type ArchiveExpiryEnv = z.infer<typeof ArchiveExpiryEnvSchema>;
 
 const cache = new Map<string, unknown>();
 function parseEnv<T>(key: string, schema: z.ZodType<T, z.ZodTypeDef, unknown>, source: NodeJS.ProcessEnv): T {
@@ -35,10 +35,9 @@ function parseEnv<T>(key: string, schema: z.ZodType<T, z.ZodTypeDef, unknown>, s
   if (source === process.env) cache.set(key, value);
   return value;
 }
-export const getApiEnv = (source: NodeJS.ProcessEnv = process.env): ApiEnv => parseEnv('api', ApiEnvSchema, source);
+export const getApiEnv = (source: NodeJS.ProcessEnv = process.env): Env => parseEnv('api', ApiEnvSchema, source);
 export const getChatReviewEnv = (source: NodeJS.ProcessEnv = process.env): ChatReviewEnv => parseEnv('chat-review', ChatReviewEnvSchema, source);
 export const getRecordingEnv = (source: NodeJS.ProcessEnv = process.env): RecordingEnv => parseEnv('recording', RecordingEnvSchema, source);
 export const getCognitoEnv = (source: NodeJS.ProcessEnv = process.env): CognitoEnv => parseEnv('cognito', CognitoEnvSchema, source);
-/** API env compatibility alias. */
-export const getEnv = getApiEnv;
+export const getArchiveExpiryEnv = (source: NodeJS.ProcessEnv = process.env): ArchiveExpiryEnv => parseEnv('archive-expiry', ArchiveExpiryEnvSchema, source);
 export function resetEnvCache(): void { cache.clear(); }

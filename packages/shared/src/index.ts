@@ -5,7 +5,6 @@ export * from './permissions';
 export * from './moderation';
 
 export const CHAT_EVENTS = ['broadcast-started', 'broadcast-ended', 'slides-updated', 'archives-updated'] as const;
-export const CHAT_EVENT_NAMES = CHAT_EVENTS;
 export const DISPLAY_NAME_MIN = 1;
 export const DISPLAY_NAME_MAX = 20;
 export const COMMENT_MIN = 1;
@@ -13,6 +12,7 @@ export const COMMENT_MAX = 200;
 export const SLIDE_MAX_BYTES = 50 * 1024 * 1024;
 export const SLIDE_TITLE_MAX = 100;
 export const TOKEN_TTL_SECONDS = 600;
+export const ARCHIVE_RETENTION_DAYS = 365;
 
 const hasControlChars = (value: string) => /[\u0000-\u001f\u007f-\u009f]/u.test(value);
 export const DisplayNameSchema = z.string().trim().min(DISPLAY_NAME_MIN).max(DISPLAY_NAME_MAX).refine((v) => !hasControlChars(v), '制御文字は使用できません');
@@ -67,18 +67,16 @@ export const ChatCustomEventSchema = z.object({ eventName: z.enum(CHAT_EVENTS), 
 export const SlideCompleteResponseSchema = SlideSchema;
 export const SlideCreateResponseSchema = SlideSchema;
 export const ArchiveUpdateResponseSchema = ArchiveSchema;
-export const UserInviteResponseSchema = z.object({ invited: z.array(z.string().email()) });
+export const INVITE_FAILURE_REASONS = ['ALREADY_EXISTS', 'INVALID_PARAMETER', 'FAILED'] as const;
+export const InviteFailureSchema = z.object({ email: z.string().email(), reason: z.enum(INVITE_FAILURE_REASONS) });
+export const UserInviteResponseSchema = z.object({ invited: z.array(z.string().email()), failed: z.array(InviteFailureSchema) });
 export const UserUpdateResponseSchema = z.object({ userId: z.string(), role: RoleSchema, enabled: z.boolean() });
-export const CsvExportResponseSchema = z.string();
 
-export const BroadcastIdParamsSchema = z.object({ id: z.string().min(1) });
 export const DeviceIdParamsSchema = z.object({ deviceId: z.string().min(1) });
 export const MessageIdParamsSchema = z.object({ messageId: z.string().min(1) });
 export const UserIdParamsSchema = z.object({ userId: z.string().min(1) });
 export const SlideIdParamsSchema = z.object({ id: z.string().min(1) });
 export const ArchiveIdParamsSchema = z.object({ id: z.string().min(1) });
-export const NgWordParamsSchema = z.object({ word: NgWordSchema });
-export const ArchiveListQuerySchema = z.object({ role: RoleSchema.optional() });
 export const ArchiveUpdateRequestSchema = z.object({ title: TitleSchema.optional(), published: z.boolean().optional(), retainUntil: z.string().datetime().optional() }).refine((value) => Object.keys(value).length > 0);
 
 export type MeResponse = z.infer<typeof MeResponseSchema>;
@@ -93,4 +91,5 @@ export type Slide = z.infer<typeof SlideSchema>;
 export type Archive = z.infer<typeof ArchiveSchema>;
 export type InviteUsersRequest = z.infer<typeof InviteUsersRequestSchema>;
 export type UpdateRoleRequest = z.infer<typeof UpdateRoleRequestSchema>;
+export type UserInviteResponse = z.infer<typeof UserInviteResponseSchema>;
 

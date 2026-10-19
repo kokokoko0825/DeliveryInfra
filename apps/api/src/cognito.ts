@@ -3,6 +3,7 @@ import { PutCommand } from '@aws-sdk/lib-dynamodb';
 import { RoleSchema } from '@delivery/shared';
 import { createClients } from './aws';
 import type { Clients } from './aws';
+import { KEYS } from './database';
 import { getCognitoEnv, type CognitoEnv } from './env';
 
 export interface CognitoPostAuthenticationEvent {
@@ -30,9 +31,10 @@ export function createCognitoPostAuthenticationHandler(dependencies?: { env?: Co
     const userId = attrs.sub;
     if (!userId) throw new Error('Cognito user sub attribute is required');
     const now = dependencies?.now?.() ?? Date.now();
-    if (isPostAuthentication) await clients.ddb.send(new PutCommand({
+    // 外部 IdP の初回ログインは PostConfirmation しか走らないため、ここでも最終ログインを記録する（R1-20）
+    await clients.ddb.send(new PutCommand({
       TableName: env.TABLE_NAME,
-      Item: { PK: `USER#${userId}`, SK: 'LOGIN', lastLoginAt: new Date(now).toISOString(), loginMethod: externalIdp ? 'Okta' : 'email' },
+      Item: { PK: KEYS.user(userId), SK: 'LOGIN', lastLoginAt: new Date(now).toISOString(), loginMethod: externalIdp ? 'Okta' : 'email' },
     }));
     return event;
   };

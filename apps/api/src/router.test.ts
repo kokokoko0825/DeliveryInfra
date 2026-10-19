@@ -1,13 +1,15 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockClient } from 'aws-sdk-client-mock';
-import { DeleteCommand, GetCommand, PutCommand, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import { CreateParticipantTokenCommand, GetStageCommand, ListParticipantsCommand, ListStageSessionsCommand, StartCompositionCommand, StopCompositionCommand } from '@aws-sdk/client-ivs-realtime';
+import { BatchGetCommand, DeleteCommand, GetCommand, PutCommand, QueryCommand, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { CreateParticipantTokenCommand, DisconnectParticipantCommand, GetStageCommand, ListParticipantsCommand, ListStageSessionsCommand, StartCompositionCommand, StopCompositionCommand } from '@aws-sdk/client-ivs-realtime';
 import { CreateChatTokenCommand, DeleteMessageCommand, DisconnectUserCommand, GetRoomCommand, SendEventCommand } from '@aws-sdk/client-ivschat';
 import { DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { GetParameterCommand } from '@aws-sdk/client-ssm';
-import { AdminAddUserToGroupCommand, AdminCreateUserCommand, AdminDeleteUserCommand, AdminDisableUserCommand, AdminEnableUserCommand, AdminListGroupsForUserCommand, AdminRemoveUserFromGroupCommand, AdminUserGlobalSignOutCommand, ListUsersCommand } from '@aws-sdk/client-cognito-identity-provider';
+import { AdminAddUserToGroupCommand, AdminCreateUserCommand, AdminDeleteUserCommand, AdminDisableUserCommand, AdminEnableUserCommand, AdminGetUserCommand, AdminListGroupsForUserCommand, AdminRemoveUserFromGroupCommand, AdminUserGlobalSignOutCommand, ListUsersCommand, ListUsersInGroupCommand } from '@aws-sdk/client-cognito-identity-provider';
 vi.mock('@aws-sdk/s3-presigned-post', () => ({ createPresignedPost: vi.fn(async () => ({ url: 'https://upload.example.test', fields: { key: 'slide.pdf' } })) }));
 vi.mock('@aws-sdk/cloudfront-signer', () => ({ getSignedCookies: vi.fn(() => ({ 'CloudFront-Policy': 'policy', 'CloudFront-Signature': 'signature', 'CloudFront-Key-Pair-Id': 'pair' })) }));
+import { getSignedCookies } from '@aws-sdk/cloudfront-signer';
+import { ArchivesResponseSchema, MeResponseSchema, UserInviteResponseSchema, UsersResponseSchema } from '@delivery/shared';
 import { createClients } from './aws';
 import { ApiEnvSchema } from './env';
 import { createApiHandler, type FunctionUrlEvent } from './router';
@@ -21,28 +23,39 @@ const chat = mockClient(clients.chat);
 const s3 = mockClient(clients.s3);
 const cognito = mockClient(clients.cognito);
 const ssm = mockClient(clients.ssm);
+const NOW_MS = 1_700_000_000_000;
+const NOW_S = NOW_MS / 1000;
+const UUID = '0b6c2a52-1111-4222-8333-444455556666';
 
+type RoleName = 'admin' | 'camera' | 'audio' | 'presenter' | 'viewer';
 const makeEvent = (method: string, path: string, body?: unknown): FunctionUrlEvent => ({
   rawPath: `/api${path}`, headers: { 'X-Auth-Token': 'access-token', 'x-forwarded-host': 'example.cloudfront.net' },
   requestContext: { http: { method, path: `/api${path}` } },
   ...(body === undefined ? {} : { body: JSON.stringify(body) }),
 });
-const request = (role: 'admin' | 'camera' | 'audio' | 'presenter' | 'viewer', method: string, path: string, body?: unknown) =>
-  createApiHandler({ env, clients, authenticate: vi.fn().mockResolvedValue({ userId: 'user-1', email: 'user@example.test', role, loginMethod: 'email' }), now: () => 1_700_000_000_000 })(makeEvent(method, path, body));
-const conditionalError = () => Object.assign(new Error('slot busy'), { name: 'ConditionalCheckFailedException' });
+const request = (role: RoleName, method: string, path: string, body?: unknown, userId = 'user-1') =>
+  createApiHandler({ env, clients, authenticate: vi.fn().mockResolvedValue({ userId, username: `${userId}-name`, role }), now: () => NOW_MS })(makeEvent(method, path, body));
+const awsError = (name: string) => Object.assign(new Error(name), { name });
+const conditionalError = () => awsError('ConditionalCheckFailedException');
+interface Payload { error?: { code: string; message: string }; [key: string]: unknown }
+const data = (response: { body: string }): Payload => JSON.parse(response.body) as Payload;
+const lease = (sk: string, extra: Record<string, unknown> = {}) => ({ PK: 'DEVICE', SK: sk, deviceId: `${sk.replace('#', '.')}.${UUID}`, deviceName: 'CAM1', purpose: sk.split('#')[0], userId: 'user-1', ttl: NOW_S + 10, ...extra });
 
 beforeEach(() => {
   ddb.reset(); ivs.reset(); chat.reset(); s3.reset(); cognito.reset(); ssm.reset();
-  ddb.on(ScanCommand).resolves({ Items: [] });
+  vi.mocked(getSignedCookies).mockClear();
+  ddb.on(QueryCommand).resolves({ Items: [] });
   ddb.on(GetCommand).resolves({});
   ddb.on(UpdateCommand).resolves({});
   ddb.on(DeleteCommand).resolves({});
   ddb.on(PutCommand).resolves({});
+  ddb.on(BatchGetCommand).resolves({ Responses: { table: [] } });
   ivs.on(StartCompositionCommand).resolves({ composition: { arn: 'composition-arn', stageArn: 'broadcast', state: 'ACTIVE', layout: {}, destinations: [{ id: 'destination-id', state: 'ACTIVE', configuration: {}, detail: { s3: { recordingPrefix: 'stage/session/destination/composite' } } } as never] } });
   ivs.on(GetStageCommand).resolves({ stage: { arn: 'broadcast', activeSessionId: 'session-1' } });
   ivs.on(ListParticipantsCommand).resolves({ participants: [] });
   ivs.on(ListStageSessionsCommand).resolves({ stageSessions: [] });
   ivs.on(StopCompositionCommand).resolves({});
+  ivs.on(DisconnectParticipantCommand).resolves({});
   chat.on(SendEventCommand).resolves({});
   chat.on(CreateChatTokenCommand).resolves({ token: 'chat-token' });
   chat.on(GetRoomCommand).resolves({ arn: 'room' });
@@ -55,6 +68,7 @@ beforeEach(() => {
   ssm.on(GetParameterCommand).resolves({ Parameter: { Type: 'SecureString', Value: 'private-key' } });
   cognito.on(AdminCreateUserCommand).resolves({ User: { Username: 'new-user' } });
   cognito.on(AdminAddUserToGroupCommand).resolves({});
+  cognito.on(AdminGetUserCommand).resolves({ Username: 'user-1-name', UserAttributes: [{ Name: 'email', Value: 'user@example.test' }] });
   cognito.on(AdminListGroupsForUserCommand).resolves({ Groups: [] });
   cognito.on(AdminRemoveUserFromGroupCommand).resolves({});
   cognito.on(AdminDisableUserCommand).resolves({});
@@ -62,8 +76,11 @@ beforeEach(() => {
   cognito.on(AdminUserGlobalSignOutCommand).resolves({});
   cognito.on(AdminDeleteUserCommand).resolves({});
   cognito.on(ListUsersCommand).resolves({ Users: [] });
+  cognito.on(ListUsersInGroupCommand).resolves({ Users: [] });
   ivs.on(CreateParticipantTokenCommand).resolves({ participantToken: { participantId: 'participant', token: 'signed-token', expirationTime: new Date('2026-01-01T00:00:00.000Z'), capabilities: ['PUBLISH'] } });
 });
+// R1-10: どの経路もテーブル全体の Scan をしない
+afterEach(() => expect(ddb.commandCalls(ScanCommand)).toHaveLength(0));
 
 describe('API router', () => {
   it('rejects unauthenticated calls before routing', async () => {
@@ -85,6 +102,7 @@ describe('API router', () => {
   it('validates slide extension, MIME and 50 MB boundary before generating uploads', async () => {
     const base = { title: '資料', fileName: 'slide.pdf', contentType: 'application/pdf' };
     await expect(request('admin', 'POST', '/slides/upload-url', { ...base, size: 52_428_800 })).resolves.toMatchObject({ statusCode: 200 });
+    expect(ddb.commandCalls(PutCommand)[0]?.args[0].input.Item).toMatchObject({ PK: 'SLIDE', status: 'pending' });
     await expect(request('admin', 'POST', '/slides/upload-url', { ...base, fileName: 'slide.txt', size: 10 })).resolves.toMatchObject({ statusCode: 400 });
     await expect(request('admin', 'POST', '/slides/upload-url', { ...base, contentType: 'text/plain', size: 10 })).resolves.toMatchObject({ statusCode: 400 });
     await expect(request('admin', 'POST', '/slides/upload-url', { ...base, size: 52_428_801 })).resolves.toMatchObject({ statusCode: 400 });
@@ -100,7 +118,7 @@ describe('API router', () => {
   ] as const)('enforces the concurrent $purpose slot cap of $limit', async ({ role, purpose, limit }) => {
     const occupied = new Set<string>();
     ddb.on(PutCommand).callsFake(async (input) => {
-      const key = String(input.Item?.PK);
+      const key = `${String(input.Item?.PK)}|${String(input.Item?.SK)}`;
       if (occupied.has(key)) throw conditionalError();
       occupied.add(key);
       return {};
@@ -110,6 +128,7 @@ describe('API router', () => {
     }
     await expect(request(role, 'POST', '/tokens/stage', { purpose, deviceName: 'overflow' })).resolves.toMatchObject({ statusCode: 409, body: expect.stringContaining('DEVICE_LIMIT') });
     expect(occupied.size).toBe(limit);
+    expect([...occupied].every((key) => key.startsWith(`DEVICE|${purpose}#`))).toBe(true);
   });
   it('issues viewer tokens without consuming a sending slot', async () => {
     await expect(request('viewer', 'POST', '/tokens/stage', { purpose: 'viewer' })).resolves.toMatchObject({ statusCode: 200, body: expect.stringContaining('signed-token') });
@@ -117,17 +136,118 @@ describe('API router', () => {
   });
 });
 
-describe('API router endpoint behavior', () => {
-  interface Payload { error?: { code: string; message: string }; [key: string]: unknown }
-  const data = (response: { body: string }): Payload => JSON.parse(response.body) as Payload;
+describe('stage tokens and device slots', () => {
+  it('lets the switcher fetch tokens repeatedly without device slots (R1-02)', async () => {
+    for (let index = 0; index < 3; index += 1) {
+      const response = await request('admin', 'POST', '/tokens/stage', { purpose: 'switcher' });
+      expect(response.statusCode).toBe(200);
+      expect(data(response).deviceId).toBeUndefined();
+      expect((data(response).tokens as { stage: string }[]).map((token) => token.stage)).toEqual(['production', 'slide', 'broadcast']);
+    }
+    expect(ddb.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ivs.commandCalls(CreateParticipantTokenCommand).map((call) => call.args[0].input.capabilities)).toEqual(Array.from({ length: 3 }, () => [['SUBSCRIBE'], ['SUBSCRIBE'], ['PUBLISH']]).flat());
+    expect(ivs.commandCalls(CreateParticipantTokenCommand)[0]?.args[0].input.attributes).toEqual({ kind: 'switcher', deviceName: 'SWITCHER' });
+  });
 
-  it('returns a complete profile and detects normalized NG display names', async () => {
+  it('embeds the slot in the device id and stores the participant id on the lease (R1-07/R1-10)', async () => {
+    const response = await request('camera', 'POST', '/tokens/stage', { purpose: 'camera', deviceName: 'CAM1' });
+    expect(data(response).deviceId).toMatch(/^camera\.1\.[0-9a-f-]{36}$/u);
+    expect(data(response).tokens).toEqual([{ stage: 'production', token: 'signed-token', participantId: 'participant', capabilities: ['PUBLISH'], expiresAt: '2026-01-01T00:00:00.000Z' }]);
+    const put = ddb.commandCalls(PutCommand)[0]?.args[0].input;
+    expect(put).toMatchObject({ Item: { PK: 'DEVICE', SK: 'camera#1', deviceName: 'CAM1', userId: 'user-1', ttl: NOW_S + 45 }, ConditionExpression: 'attribute_not_exists(PK) OR #ttl <= :now', ExpressionAttributeValues: { ':now': NOW_S }, ReturnValues: 'ALL_OLD' });
+    expect(ddb.commandCalls(UpdateCommand)[0]?.args[0].input).toMatchObject({ Key: { PK: 'DEVICE', SK: 'camera#1' }, ExpressionAttributeValues: { ':participantId': 'participant', ':stageArn': 'prod', ':deviceId': data(response).deviceId } });
+    expect(ddb.commandCalls(QueryCommand)[0]?.args[0].input).toMatchObject({ KeyConditionExpression: '#pk = :pk AND begins_with(#sk, :sk)', ExpressionAttributeValues: { ':pk': 'DEVICE', ':sk': 'camera#' }, ConsistentRead: true });
+  });
+
+  it('disconnects the participant of an expired lease before reusing its slot (R1-07)', async () => {
+    ddb.on(PutCommand).resolves({ Attributes: lease('camera#1', { participantId: 'stale-participant', stageArn: 'prod', ttl: NOW_S - 1, deviceName: 'CAM3' }) });
+    expect((await request('camera', 'POST', '/tokens/stage', { purpose: 'camera', deviceName: 'CAM7' })).statusCode).toBe(200);
+    expect(ivs.commandCalls(DisconnectParticipantCommand).map((call) => call.args[0].input)).toEqual([{ stageArn: 'prod', participantId: 'stale-participant', reason: '送信枠が失効しました' }]);
+  });
+
+  it('treats an already-gone participant as disconnected but rolls back on other disconnect errors (R1-07)', async () => {
+    ddb.on(PutCommand).resolves({ Attributes: lease('camera#1', { participantId: 'stale', stageArn: 'prod' }) });
+    ivs.on(DisconnectParticipantCommand).rejects(awsError('ResourceNotFoundException'));
+    expect((await request('camera', 'POST', '/tokens/stage', { purpose: 'camera', deviceName: 'CAM7' })).statusCode).toBe(200);
+    ivs.on(DisconnectParticipantCommand).rejects(awsError('AccessDeniedException'));
+    const failed = await request('camera', 'POST', '/tokens/stage', { purpose: 'camera', deviceName: 'CAM7' });
+    expect(failed.statusCode).toBe(500);
+    expect(ddb.commandCalls(DeleteCommand).at(-1)?.args[0].input).toMatchObject({ Key: { PK: 'DEVICE', SK: 'camera#1' }, ConditionExpression: 'deviceId = :deviceId' });
+    expect(ivs.commandCalls(CreateParticipantTokenCommand)).toHaveLength(1);
+  });
+
+  it('rejects an active duplicate device name owned by someone else (R1-18)', async () => {
+    ddb.on(QueryCommand).resolves({ Items: [lease('camera#2', { userId: 'other', deviceName: 'CAM1' })] });
+    const response = await request('camera', 'POST', '/tokens/stage', { purpose: 'camera', deviceName: 'CAM1' });
+    expect(response.statusCode).toBe(409);
+    expect(data(response).error).toEqual({ code: 'DEVICE_NAME_IN_USE', message: 'この端末名は使用中です' });
+    expect(ddb.commandCalls(PutCommand)).toHaveLength(0);
+  });
+
+  it('ignores an expired duplicate name and lets the same user take over their own slot (R1-18)', async () => {
+    ddb.on(QueryCommand).resolves({ Items: [lease('camera#2', { userId: 'other', deviceName: 'CAM1', ttl: NOW_S })] });
+    expect((await request('camera', 'POST', '/tokens/stage', { purpose: 'camera', deviceName: 'CAM1' })).statusCode).toBe(200);
+    expect(ddb.commandCalls(PutCommand)[0]?.args[0].input.Item?.SK).toBe('camera#1');
+
+    ddb.on(QueryCommand).resolves({ Items: [lease('camera#2', { deviceName: 'CAM1', participantId: 'old', stageArn: 'prod' })] });
+    ddb.on(PutCommand).resolves({ Attributes: lease('camera#2', { deviceName: 'CAM1', participantId: 'old', stageArn: 'prod' }) });
+    expect((await request('camera', 'POST', '/tokens/stage', { purpose: 'camera', deviceName: 'CAM1' })).statusCode).toBe(200);
+    expect(ddb.commandCalls(PutCommand).at(-1)?.args[0].input).toMatchObject({ Item: { SK: 'camera#2' }, ConditionExpression: 'deviceId = :previous', ExpressionAttributeValues: { ':previous': `camera.2.${UUID}` } });
+    expect(ivs.commandCalls(DisconnectParticipantCommand).at(-1)?.args[0].input).toEqual({ stageArn: 'prod', participantId: 'old', reason: '同じ端末名で再接続されました' });
+  });
+
+  it('lists active devices with a single partition query', async () => {
+    ddb.on(QueryCommand).resolves({ Items: [lease('camera#1'), lease('mic#1', { deviceId: 'old', ttl: NOW_S })] });
+    expect(data(await request('admin', 'GET', '/devices'))).toEqual([{ deviceId: `camera.1.${UUID}`, deviceName: 'CAM1', kind: 'camera', userId: 'user-1', connected: true }]);
+    expect(ddb.commandCalls(QueryCommand)[0]?.args[0].input).toMatchObject({ KeyConditionExpression: '#pk = :pk', ExpressionAttributeValues: { ':pk': 'DEVICE' } });
+  });
+
+  it('looks up heartbeats by the slot embedded in the device id and enforces ownership', async () => {
+    const deviceId = `camera.1.${UUID}`;
+    ddb.on(GetCommand, { Key: { PK: 'DEVICE', SK: 'camera#1' } }).resolves({ Item: lease('camera#1') });
+    const ok = await request('camera', 'POST', `/devices/${deviceId}/heartbeat`);
+    expect(data(ok)).toEqual({ expiresAt: new Date((NOW_S + 45) * 1000).toISOString() });
+    expect(ddb.commandCalls(UpdateCommand)[0]?.args[0].input).toMatchObject({ Key: { PK: 'DEVICE', SK: 'camera#1' }, ConditionExpression: 'deviceId = :deviceId', ExpressionAttributeValues: { ':ttl': NOW_S + 45, ':deviceId': deviceId } });
+    expect(data(await request('viewer', 'POST', `/devices/${deviceId}/heartbeat`, undefined, 'other')).error).toMatchObject({ code: 'NOT_FOUND', message: '対象が見つかりません' });
+    expect(data(await request('camera', 'POST', '/devices/not-a-device-id/heartbeat')).error?.code).toBe('NOT_FOUND');
+    expect(data(await request('camera', 'POST', `/devices/camera.1.${UUID.replace('0b6c', '9999')}/heartbeat`)).error?.code).toBe('NOT_FOUND');
+  });
+
+  it('returns 404 when the lease is taken over during a heartbeat (R1-14)', async () => {
+    ddb.on(GetCommand, { Key: { PK: 'DEVICE', SK: 'camera#1' } }).resolves({ Item: lease('camera#1') });
+    ddb.on(UpdateCommand).rejects(conditionalError());
+    const response = await request('camera', 'POST', `/devices/camera.1.${UUID}/heartbeat`);
+    expect(response.statusCode).toBe(404);
+  });
+
+  it('disconnects the participant when a device is released and enforces release ownership', async () => {
+    ddb.on(GetCommand, { Key: { PK: 'DEVICE', SK: 'camera#1' } }).resolves({ Item: lease('camera#1', { userId: 'other', participantId: 'p-1', stageArn: 'prod' }) });
+    expect(data(await request('camera', 'DELETE', `/devices/camera.1.${UUID}`)).error).toMatchObject({ code: 'FORBIDDEN', message: 'この操作を行う権限がありません' });
+    expect(ivs.commandCalls(DisconnectParticipantCommand)).toHaveLength(0);
+    expect((await request('admin', 'DELETE', `/devices/camera.1.${UUID}`)).statusCode).toBe(200);
+    expect(ivs.commandCalls(DisconnectParticipantCommand)[0]?.args[0].input).toMatchObject({ stageArn: 'prod', participantId: 'p-1' });
+    expect(ddb.commandCalls(DeleteCommand)[0]?.args[0].input).toMatchObject({ Key: { PK: 'DEVICE', SK: 'camera#1' }, ExpressionAttributeValues: { ':deviceId': `camera.1.${UUID}` } });
+  });
+});
+
+describe('API router endpoint behavior', () => {
+  it('returns email and login method from Cognito because access tokens lack them (R1-01)', async () => {
     ddb.on(GetCommand).resolves({ Item: { displayName: 'Kos', commentSuspended: true } });
-    await expect(request('viewer', 'GET', '/me')).resolves.toMatchObject({ statusCode: 200, body: JSON.stringify({ userId: 'user-1', email: 'user@example.test', role: 'viewer', loginMethod: 'email', displayName: 'Kos', commentSuspended: true }) });
-    ddb.on(ScanCommand).resolves({ Items: [{ word: 'bad' }] });
+    cognito.on(AdminGetUserCommand).resolves({ Username: 'okta_user', UserAttributes: [{ Name: 'email', Value: 'okta@example.test' }, { Name: 'identities', Value: '[{"providerName":"Okta"}]' }] });
+    const response = await request('viewer', 'GET', '/me');
+    expect(MeResponseSchema.parse(data(response))).toEqual({ userId: 'user-1', email: 'okta@example.test', role: 'viewer', loginMethod: 'Okta', displayName: 'Kos', commentSuspended: true });
+    expect(cognito.commandCalls(AdminGetUserCommand)[0]?.args[0].input).toEqual({ UserPoolId: 'pool', Username: 'user-1-name' });
+    cognito.on(AdminGetUserCommand).resolves({ Username: 'user-1-name', UserAttributes: [{ Name: 'email', Value: 'user@example.test' }] });
+    ddb.on(GetCommand).resolves({});
+    expect(MeResponseSchema.parse(data(await request('viewer', 'GET', '/me')))).toEqual({ userId: 'user-1', email: 'user@example.test', role: 'viewer', loginMethod: 'email', displayName: null, commentSuspended: false });
+  });
+
+  it('detects normalized NG display names from the NGWORD partition', async () => {
+    ddb.on(QueryCommand).resolves({ Items: [{ PK: 'NGWORD', SK: 'bad', word: 'bad' }] });
     const blocked = await request('viewer', 'PUT', '/me/display-name', { displayName: 'ＢＡＤ' });
     expect(blocked.statusCode).toBe(400);
     expect(data(blocked).error).toMatchObject({ code: 'NG_WORD', message: '使用できない単語が含まれています' });
+    expect(ddb.commandCalls(QueryCommand)[0]?.args[0].input.ExpressionAttributeValues).toEqual({ ':pk': 'NGWORD' });
   });
 
   it('returns missing and starting broadcast states as idle', async () => {
@@ -142,7 +262,9 @@ describe('API router endpoint behavior', () => {
     expect(response.statusCode).toBe(200);
     expect(ivs.commandCalls(StartCompositionCommand)[0]?.args[0].input.destinations?.[0]?.s3?.recordingConfiguration).toEqual({ hlsConfiguration: { targetSegmentDurationSeconds: 10 }, format: 'HLS' });
     expect(ddb.commandCalls(PutCommand).map((call) => call.args[0].input.Item?.PK)).toContain('COMPOSITION#composition-arn');
-    expect(ddb.commandCalls(UpdateCommand)[0]?.args[0].input.ExpressionAttributeValues).toMatchObject({ ':recordingPrefix': 'stage/session/destination/composite' });
+    expect(ddb.commandCalls(UpdateCommand)[0]?.args[0].input.ExpressionAttributeValues).toMatchObject({ ':outputPrefix': 'stage/session/destination/composite' });
+    expect(ddb.commandCalls(PutCommand).find((call) => call.args[0].input.Item?.SK === 'META')?.args[0].input.Item).toMatchObject({ outputPrefix: 'stage/session/destination/composite' });
+    expect(ddb.commandCalls(PutCommand).every((call) => !('recordingPrefix' in (call.args[0].input.Item ?? {})))).toBe(true);
     expect(chat.commandCalls(SendEventCommand)[0]?.args[0].input.eventName).toBe('broadcast-started');
     expect(data(response)).toMatchObject({ title: '大会', status: 'live', endedAt: null });
   });
@@ -167,6 +289,24 @@ describe('API router endpoint behavior', () => {
     expect(data(await request('admin', 'POST', '/broadcast/stop')).error).toMatchObject({ code: 'BROADCAST_NOT_LIVE', message: '配信中ではありません' });
   });
 
+  it('ends the broadcast when the composition already stopped by itself (R1-03)', async () => {
+    ddb.on(GetCommand).resolves({ Item: { id: 'b-1', title: '大会', status: 'live', compositionArn: 'composition-arn', startedAt: '2026-01-01T00:00:00.000Z' } });
+    ivs.on(StopCompositionCommand).rejects(awsError('ResourceNotFoundException'));
+    const stopped = await request('admin', 'POST', '/broadcast/stop');
+    expect(stopped.statusCode).toBe(200);
+    expect(data(stopped).status).toBe('ended');
+    expect(ddb.commandCalls(UpdateCommand)[0]?.args[0].input.ExpressionAttributeValues).toMatchObject({ ':status': 'ended' });
+    expect(chat.commandCalls(SendEventCommand).map((call) => call.args[0].input.eventName)).toEqual(['broadcast-ended']);
+  });
+
+  it('keeps the broadcast live when stopping fails for another reason', async () => {
+    ddb.on(GetCommand).resolves({ Item: { id: 'b-1', status: 'live', compositionArn: 'composition-arn' } });
+    ivs.on(StopCompositionCommand).rejects(awsError('ConflictException'));
+    expect((await request('admin', 'POST', '/broadcast/stop')).statusCode).toBe(500);
+    expect(ddb.commandCalls(UpdateCommand)).toHaveLength(0);
+    expect(chat.commandCalls(SendEventCommand)).toHaveLength(0);
+  });
+
   it('counts connected subscribers across participant pages and returns zero without a session', async () => {
     let participantPage = 0;
     ivs.on(ListParticipantsCommand).callsFake(async () => { participantPage += 1; return participantPage === 1 ? { participants: [{ published: false }, { published: true }], nextToken: 'next' } : { participants: [{ published: false }] }; });
@@ -176,22 +316,28 @@ describe('API router endpoint behavior', () => {
     expect(data(await request('admin', 'GET', '/broadcast/stats'))).toEqual({ viewerCount: 0 });
   });
 
-  it('reports operational status for available and failed stages and chat', async () => {
-    ivs.on(GetStageCommand).callsFake(async ({ arn }) => arn === 'slide' ? Promise.reject(new Error('missing')) : ({ stage: { activeSessionId: arn === 'prod' ? 'active' : undefined } }));
-    ivs.on(ListStageSessionsCommand).resolves({ stageSessions: [{ sessionId: 'idle-session' }] });
-    chat.on(GetRoomCommand).rejects(new Error('chat missing'));
+  it('reports missing stages and chat rooms as not existing', async () => {
+    ivs.on(GetStageCommand).callsFake(async ({ arn }) => arn === 'slide' ? Promise.reject(awsError('ResourceNotFoundException')) : ({ stage: { activeSessionId: arn === 'prod' ? 'active' : undefined } }));
+    ivs.on(ListStageSessionsCommand).callsFake(async ({ stageArn }) => ({ stageSessions: stageArn === 'broadcast' ? [{ sessionId: 'live-session' }] : [] }));
+    chat.on(GetRoomCommand).rejects(awsError('ResourceNotFoundException'));
     const status = data(await request('admin', 'GET', '/status'));
     expect(status.stages).toEqual([{ name: 'production', exists: true, status: 'ACTIVE' }, { name: 'slide', exists: false }, { name: 'broadcast', exists: true, status: 'ACTIVE' }]);
     expect(status.chatRoom).toEqual({ exists: false });
+    ivs.on(GetStageCommand).resolves({ stage: { arn: 'x' } });
+    ivs.on(ListStageSessionsCommand).resolves({ stageSessions: [{ sessionId: 'old', endTime: new Date('2026-01-01T00:00:00Z') }] });
+    chat.on(GetRoomCommand).resolves({ arn: 'room' });
+    expect(data(await request('admin', 'GET', '/status'))).toEqual({ stages: ['production', 'slide', 'broadcast'].map((name) => ({ name, exists: true, status: 'IDLE' })), chatRoom: { exists: true, status: 'ACTIVE' } });
   });
 
-  it('lists active devices and enforces heartbeat ownership and release rules', async () => {
-    ddb.on(ScanCommand).resolves({ Items: [{ PK: 'DEVICE#camera#1', SK: 'LEASE', deviceId: 'd-1', deviceName: 'CAM1', purpose: 'camera', userId: 'user-1', ttl: 1_700_000_010 }, { deviceId: 'old', ttl: 1_700_000_000 }] });
-    expect(data(await request('admin', 'GET', '/devices'))).toEqual([{ deviceId: 'd-1', deviceName: 'CAM1', kind: 'camera', userId: 'user-1', connected: true }]);
-    ddb.on(ScanCommand).resolves({ Items: [{ PK: 'DEVICE#camera#1', SK: 'LEASE', deviceId: 'd-1', userId: 'other' }] });
-    expect(data(await request('viewer', 'POST', '/devices/d-1/heartbeat')).error).toMatchObject({ code: 'NOT_FOUND', message: '対象が見つかりません' });
-    expect(data(await request('viewer', 'DELETE', '/devices/d-1')).error).toMatchObject({ code: 'FORBIDDEN', message: 'この操作を行う権限がありません' });
-    expect((await request('admin', 'DELETE', '/devices/d-1')).statusCode).toBe(200);
+  it.each([
+    ['ListStageSessions', () => ivs.on(ListStageSessionsCommand).rejects(awsError('AccessDeniedException'))],
+    ['GetStage', () => ivs.on(GetStageCommand).rejects(awsError('AccessDeniedException'))],
+    ['GetRoom', () => chat.on(GetRoomCommand).rejects(awsError('AccessDeniedException'))],
+  ])('surfaces %s permission errors instead of reporting a missing resource (R1-06)', async (_name, arrange) => {
+    arrange();
+    const response = await request('admin', 'GET', '/status');
+    expect(response.statusCode).toBe(500);
+    expect(data(response).error?.code).toBe('INTERNAL_ERROR');
   });
 
   it('issues chat tokens according to suspension and admin capabilities', async () => {
@@ -200,45 +346,70 @@ describe('API router endpoint behavior', () => {
     expect(data(await request('admin', 'POST', '/tokens/chat'))).toEqual({ token: 'chat-token', capabilities: ['SEND_MESSAGE', 'DELETE_MESSAGE', 'DISCONNECT_USER'] });
   });
 
-  it('returns at most 100 recent comments in descending time order and excludes deleted records', async () => {
-    ddb.on(ScanCommand).resolves({ Items: [{ messageId: 'old', userId: 'u', displayName: 'A', comment: 'old', sentAt: '2026-01-01T00:00:00.000Z', deleted: false }, { messageId: 'new', userId: 'u', displayName: 'A', comment: 'new', sentAt: '2026-01-02T00:00:00.000Z', deleted: false }, { messageId: 'gone', userId: 'u', displayName: 'A', comment: 'gone', sentAt: '2026-01-03T00:00:00.000Z', deleted: true }] });
-    expect(data(await request('viewer', 'GET', '/comments/recent'))).toEqual([{ messageId: 'new', userId: 'u', displayName: 'A', comment: 'new', sentAt: '2026-01-02T00:00:00.000Z', deleted: false }, { messageId: 'old', userId: 'u', displayName: 'A', comment: 'old', sentAt: '2026-01-01T00:00:00.000Z', deleted: false }]);
+  it('reads recent comments newest first from the COMMENT partition without deleted records', async () => {
+    const comment = (id: string, sentAt: string) => ({ messageId: id, userId: 'u', displayName: 'A', comment: id, sentAt, deleted: false });
+    ddb.on(QueryCommand).resolves({ Items: [comment('new', '2026-01-02T00:00:00.000Z'), comment('old', '2026-01-01T00:00:00.000Z')] });
+    expect(data(await request('viewer', 'GET', '/comments/recent'))).toEqual([comment('new', '2026-01-02T00:00:00.000Z'), comment('old', '2026-01-01T00:00:00.000Z')]);
+    expect(ddb.commandCalls(QueryCommand)[0]?.args[0].input).toMatchObject({
+      KeyConditionExpression: '#pk = :pk', ExpressionAttributeNames: { '#pk': 'PK', '#deleted': 'deleted' },
+      ExpressionAttributeValues: { ':pk': 'COMMENT', ':deleted': true }, FilterExpression: '#deleted <> :deleted', ScanIndexForward: false, Limit: 100,
+    });
+  });
+
+  it('pages the COMMENT partition until 100 visible comments and stops there', async () => {
+    const page = (offset: number) => Array.from({ length: 60 }, (_, index) => ({ messageId: `m${offset + index}`, userId: 'u', displayName: 'A', comment: 'c', sentAt: '2026-01-01T00:00:00.000Z', deleted: false }));
+    ddb.on(QueryCommand).resolvesOnce({ Items: page(0), LastEvaluatedKey: { PK: 'a' } }).resolvesOnce({ Items: page(60), LastEvaluatedKey: { PK: 'b' } }).resolves({ Items: page(120) });
+    const comments = data(await request('viewer', 'GET', '/comments/recent')) as unknown as { messageId: string }[];
+    expect(comments).toHaveLength(100);
+    expect(comments.at(-1)?.messageId).toBe('m99');
+    expect(ddb.commandCalls(QueryCommand)).toHaveLength(2);
+    expect(ddb.commandCalls(QueryCommand)[1]?.args[0].input.ExclusiveStartKey).toEqual({ PK: 'a' });
   });
 
   it('moderates and suspends chat users with the matching IVS commands', async () => {
-    ddb.on(GetCommand).resolves({ Item: { PK: 'COMMENT#m-1', SK: 'ITEM', messageId: 'm-1' } });
+    ddb.on(GetCommand, { Key: { PK: 'COMMENT#m-1', SK: 'REF' } }).resolves({ Item: { PK: 'COMMENT#m-1', SK: 'REF', commentSk: '2026-01-01T00:00:00.000Z#m-1' } });
     expect((await request('admin', 'DELETE', '/comments/m-1')).statusCode).toBe(200);
     expect(chat.commandCalls(DeleteMessageCommand)[0]?.args[0].input).toMatchObject({ id: 'm-1', reason: '管理者による削除' });
+    expect(ddb.commandCalls(UpdateCommand)[0]?.args[0].input).toMatchObject({ Key: { PK: 'COMMENT', SK: '2026-01-01T00:00:00.000Z#m-1' }, ExpressionAttributeValues: { ':deleted': true }, ConditionExpression: 'attribute_exists(PK)' });
+    expect(data(await request('admin', 'DELETE', '/comments/unknown')).error?.code).toBe('NOT_FOUND');
+    expect(chat.commandCalls(DeleteMessageCommand)).toHaveLength(1);
     expect((await request('admin', 'PUT', '/users/u-2/comment-suspension', { suspended: true })).statusCode).toBe(200);
     expect(chat.commandCalls(DisconnectUserCommand)[0]?.args[0].input).toMatchObject({ userId: 'u-2', reason: 'コメント送信停止' });
     expect((await request('admin', 'PUT', '/users/u-2/comment-suspension', { suspended: false })).statusCode).toBe(200);
   });
 
-  it('exports CSV with BOM, quotes and formula-injection escaping', async () => {
-    ddb.on(ScanCommand).resolves({ Items: [{ sentAt: '2026-01-01T00:00:00Z', userId: 'u', displayName: '=HYPERLINK("x")', comment: '+1' }, { sentAt: '2026-01-02T00:00:00Z', userId: 'u2', displayName: 'A', comment: 'text' }] });
+  it('exports CSV with message id, deleted flag, BOM, quotes and formula-injection escaping (R1-15)', async () => {
+    ddb.on(QueryCommand).resolves({ Items: [
+      { messageId: 'm-1', sentAt: '2026-01-01T00:00:00Z', userId: 'u', displayName: '=HYPERLINK("x")', comment: '+1', deleted: false },
+      { messageId: 'm-2', sentAt: '2026-01-02T00:00:00Z', userId: 'u2', displayName: '\tA', comment: '\rcmd', deleted: true },
+      { messageId: 'm-3', sentAt: '2026-01-03T00:00:00Z', userId: 'u3', displayName: '-x', comment: '@sum' },
+    ] });
     const response = await request('admin', 'GET', '/comments/export');
     expect(response.headers['content-type']).toBe('text/csv; charset=utf-8');
-    expect(response.body).toBe(`\uFEFF日時,ユーザーID,表示名,コメント\r\n"2026-01-01T00:00:00Z","u","'=HYPERLINK(""x"")","'+1"\r\n"2026-01-02T00:00:00Z","u2","A","text"`);
+    expect(response.body).toBe(`﻿メッセージID,日時,ユーザーID,表示名,コメント,削除済み\r\n"m-1","2026-01-01T00:00:00Z","u","'=HYPERLINK(""x"")","'+1","false"\r\n"m-2","2026-01-02T00:00:00Z","u2","'\tA","'\rcmd","true"\r\n"m-3","2026-01-03T00:00:00Z","u3","'-x","'@sum","false"`);
+    expect(ddb.commandCalls(QueryCommand)[0]?.args[0].input).toMatchObject({ ExpressionAttributeValues: { ':pk': 'COMMENT' } });
+    expect(ddb.commandCalls(QueryCommand)[0]?.args[0].input.ScanIndexForward).toBeUndefined();
   });
 
   it('lists and mutates NG words with validation and exact keys', async () => {
-    ddb.on(ScanCommand).resolves({ Items: [{ word: 'zeta' }, { word: 'alpha' }] });
+    ddb.on(QueryCommand).resolves({ Items: [{ word: 'zeta' }, { word: 'alpha' }] });
     expect(data(await request('admin', 'GET', '/ng-words'))).toEqual(['alpha', 'zeta']);
     expect((await request('admin', 'POST', '/ng-words', { word: ' blocked ' })).statusCode).toBe(200);
-    expect(ddb.commandCalls(PutCommand).at(-1)?.args[0].input.Item).toMatchObject({ PK: 'NGWORD#blocked', SK: 'ITEM', word: 'blocked' });
+    expect(ddb.commandCalls(PutCommand).at(-1)?.args[0].input.Item).toMatchObject({ PK: 'NGWORD', SK: 'blocked', word: 'blocked' });
     expect((await request('admin', 'DELETE', '/ng-words/blocked')).statusCode).toBe(200);
-    expect(ddb.commandCalls(DeleteCommand).at(-1)?.args[0].input.Key).toEqual({ PK: 'NGWORD#blocked', SK: 'ITEM' });
+    expect(ddb.commandCalls(DeleteCommand).at(-1)?.args[0].input.Key).toEqual({ PK: 'NGWORD', SK: 'blocked' });
     const invalid = await request('admin', 'POST', '/ng-words', { word: '' });
     expect(data(invalid).error?.code).toBe('VALIDATION_ERROR');
     expect(data(invalid).error?.message).toContain('String must contain at least 1 character(s)');
   });
 
   it('lists published slides and completes only a valid uploaded PDF', async () => {
-    ddb.on(ScanCommand).resolves({ Items: [{ id: 's-2', title: 'second', fileName: 'b.pdf', size: 100, order: 2, published: true }, { id: 's-1', title: 'first', fileName: 'a.pdf', size: 100, order: 1, published: true }, { id: 'hidden', published: false }] });
+    ddb.on(QueryCommand).resolves({ Items: [{ id: 's-2', title: 'second', fileName: 'b.pdf', size: 100, order: 2, published: true }, { id: 's-1', title: 'first', fileName: 'a.pdf', size: 100, order: 1, published: true }, { id: 'hidden', published: false }] });
     expect(data(await request('viewer', 'GET', '/slides'))).toEqual([{ id: 's-1', title: 'first', fileName: 'a.pdf', size: 100, order: 1, filePath: '/files/slides/s-1.pdf' }, { id: 's-2', title: 'second', fileName: 'b.pdf', size: 100, order: 2, filePath: '/files/slides/s-2.pdf' }]);
-    ddb.on(GetCommand).resolves({ Item: { id: 's-1', key: 'slides/s-1.pdf', size: 100 } });
-    const completed = await request('admin', 'POST', '/slides/s-1/complete');
-    expect(completed.statusCode).toBe(200);
+    ddb.on(GetCommand).resolves({ Item: { id: 's-3', key: 'slides/s-3.pdf', title: 'third', fileName: 'c.pdf', size: 100 } });
+    const completed = await request('admin', 'POST', '/slides/s-3/complete');
+    expect(data(completed)).toEqual({ id: 's-3', title: 'third', fileName: 'c.pdf', size: 100, order: 2, filePath: '/files/slides/s-3.pdf' });
+    expect(ddb.commandCalls(UpdateCommand)[0]?.args[0].input).toMatchObject({ Key: { PK: 'SLIDE', SK: 's-3' }, ExpressionAttributeValues: { ':published': true, ':order': 2 }, ConditionExpression: 'attribute_exists(PK)' });
     expect(s3.commandCalls(GetObjectCommand)[0]?.args[0].input.Range).toBe('bytes=0-4');
     expect(chat.commandCalls(SendEventCommand).at(-1)?.args[0].input.eventName).toBe('slides-updated');
   });
@@ -259,67 +430,201 @@ describe('API router endpoint behavior', () => {
   it('updates, reorders and deletes slides and emits the custom update event', async () => {
     ddb.on(GetCommand).resolves({ Item: { id: 's-1', key: 'slides/s-1.pdf', title: 'before', fileName: 'x.pdf', size: 100, order: 0 } });
     expect((await request('admin', 'PATCH', '/slides/s-1', { title: 'after' })).statusCode).toBe(200);
-    expect(ddb.commandCalls(UpdateCommand)[0]?.args[0].input.ExpressionAttributeValues).toEqual({ ':title': 'after' });
+    expect(ddb.commandCalls(UpdateCommand)[0]?.args[0].input).toMatchObject({ Key: { PK: 'SLIDE', SK: 's-1' }, ExpressionAttributeValues: { ':title': 'after' } });
     expect((await request('admin', 'PUT', '/slides/order', { ids: ['s-1', 's-2'] })).statusCode).toBe(200);
     expect(ddb.commandCalls(UpdateCommand).slice(1).map((call) => call.args[0].input.ExpressionAttributeValues?.[':order'])).toEqual([0, 1]);
     expect((await request('admin', 'DELETE', '/slides/s-1')).statusCode).toBe(200);
     expect(s3.commandCalls(DeleteObjectsCommand).at(-1)?.args[0].input.Delete?.Objects).toEqual([{ Key: 'slides/s-1.pdf' }]);
+    expect(ddb.commandCalls(DeleteCommand).at(-1)?.args[0].input.Key).toEqual({ PK: 'SLIDE', SK: 's-1' });
     expect(chat.commandCalls(SendEventCommand).map((call) => call.args[0].input.eventName)).toEqual(['slides-updated', 'slides-updated']);
   });
 
-  it('filters private archives for viewers and exposes the actual recording prefix to admins', async () => {
-    ddb.on(ScanCommand).resolves({ Items: [{ id: 'a-1', title: 'private', published: false, durationSeconds: 30, s3Prefix: 'stage/s/d/composite' }, { id: 'a-2', title: 'public', published: true, durationSeconds: 40, s3Prefix: 'stage/s2/d/composite' }] });
-    expect(data(await request('viewer', 'GET', '/archives'))).toEqual([{ id: 'a-2', title: 'public', published: true, durationSeconds: 40, playbackPath: '/files/archives/stage/s2/d/composite/media/hls/multivariant.m3u8' }]);
-    expect((data(await request('admin', 'GET', '/archives')) as unknown as unknown[]).length).toBe(2);
+  it.each([
+    ['PATCH', '/slides/missing', { title: 'x' }],
+    ['PUT', '/slides/order', { ids: ['s-1', 'unknown'] }],
+    ['PATCH', '/archives/missing', { title: 'x' }],
+  ] as const)('maps a failed existence condition on %s %s to 404 (R1-14)', async (method, path, body) => {
+    ddb.on(UpdateCommand).rejects(conditionalError());
+    const response = await request('admin', method, path, body);
+    expect(response.statusCode).toBe(404);
+    expect(data(response).error).toEqual({ code: 'NOT_FOUND', message: '対象が見つかりません' });
+    expect(chat.commandCalls(SendEventCommand)).toHaveLength(0);
+  });
+});
+
+describe('archives and signed cookies', () => {
+  const archive = (id: string, extra: Record<string, unknown> = {}) => ({ PK: 'ARCHIVE', SK: id, id, title: id, published: true, durationSeconds: 30, recordingPrefix: `stage/${id}/d/composite`, createdAt: '2023-11-01T00:00:00.000Z', retainUntil: '2024-11-01T00:00:00.000Z', ...extra });
+
+  it('filters private and expired archives for viewers and includes retainUntil (R1-22)', async () => {
+    ddb.on(QueryCommand).resolves({ Items: [
+      archive('a-1', { published: false }),
+      archive('a-2', { createdAt: '2023-11-02T00:00:00.000Z' }),
+      archive('expired', { retainUntil: '2023-11-14T22:13:20.000Z' }),
+      archive('legacy', { retainUntil: undefined, createdAt: '2023-01-01T00:00:00.000Z' }),
+    ] });
+    const viewer = ArchivesResponseSchema.parse(data(await request('viewer', 'GET', '/archives')));
+    expect(viewer).toEqual([
+      { id: 'a-2', title: 'a-2', published: true, durationSeconds: 30, playbackPath: '/files/archives/stage/a-2/d/composite/media/hls/multivariant.m3u8', retainUntil: '2024-11-01T00:00:00.000Z' },
+      { id: 'legacy', title: 'legacy', published: true, durationSeconds: 30, playbackPath: '/files/archives/stage/legacy/d/composite/media/hls/multivariant.m3u8', retainUntil: '2024-01-01T00:00:00.000Z' },
+    ]);
+    expect((data(await request('admin', 'GET', '/archives')) as unknown as { id: string }[]).map((item) => item.id)).toEqual(['a-2', 'a-1', 'legacy']);
+    expect(ddb.commandCalls(QueryCommand)[0]?.args[0].input.ExpressionAttributeValues).toEqual({ ':pk': 'ARCHIVE' });
   });
 
-  it('updates and deletes archives from their original S3 prefix', async () => {
-    ddb.on(GetCommand).resolves({ Item: { id: 'a-1', s3Prefix: 'stage/s/d/composite', title: 'old' } });
+  it('updates title and publication of an archive', async () => {
+    ddb.on(GetCommand).resolves({ Item: archive('a-1', { title: 'old', published: false }) });
     const updated = await request('admin', 'PATCH', '/archives/a-1', { title: 'new', published: true });
     expect(data(updated)).toMatchObject({ id: 'a-1', title: 'old', published: false });
-    expect(ddb.commandCalls(UpdateCommand)[0]?.args[0].input.UpdateExpression).toContain('title = :title, published = :published');
-    s3.on(ListObjectsV2Command).resolves({ Contents: [{ Key: 'stage/s/d/composite/file.m3u8' }] });
-    expect((await request('admin', 'DELETE', '/archives/a-1')).statusCode).toBe(200);
-    expect(s3.commandCalls(ListObjectsV2Command)[0]?.args[0].input).toMatchObject({ Bucket: 'recording', Prefix: 'stage/s/d/composite' });
+    expect(ddb.commandCalls(UpdateCommand)[0]?.args[0].input).toMatchObject({ Key: { PK: 'ARCHIVE', SK: 'a-1' }, UpdateExpression: 'SET title = :title, published = :published', ConditionExpression: 'attribute_exists(PK)' });
+    expect(chat.commandCalls(SendEventCommand)[0]?.args[0].input.eventName).toBe('archives-updated');
   });
 
-  it('signs private file cookies only for validated CloudFront hosts', async () => {
+  it.each([
+    { name: 'now', retainUntil: '2023-11-14T22:13:20.000Z', statusCode: 400 },
+    { name: 'past', retainUntil: '2023-01-01T00:00:00.000Z', statusCode: 400 },
+    { name: 'now + 1ms', retainUntil: '2023-11-14T22:13:20.001Z', statusCode: 200 },
+  ])('extends retainUntil together with the TTL attribute only into the future ($name)', async ({ retainUntil, statusCode }) => {
+    ddb.on(GetCommand).resolves({ Item: archive('a-1', { retainUntil: '2025-01-01T00:00:00.000Z' }) });
+    const response = await request('admin', 'PATCH', '/archives/a-1', { retainUntil });
+    expect(response.statusCode).toBe(statusCode);
+    if (statusCode === 400) {
+      expect(data(response).error).toEqual({ code: 'VALIDATION_ERROR', message: '保存期限は現在より後の日時を指定してください' });
+      expect(ddb.commandCalls(UpdateCommand)).toHaveLength(0);
+    } else {
+      expect(ddb.commandCalls(UpdateCommand)[0]?.args[0].input).toMatchObject({ UpdateExpression: 'SET retainUntil = :retainUntil, #ttl = :ttl', ExpressionAttributeNames: { '#ttl': 'ttl' }, ExpressionAttributeValues: { ':retainUntil': retainUntil, ':ttl': NOW_S } });
+    }
+  });
+
+  it('deletes an archive under its exact recording prefix', async () => {
+    ddb.on(GetCommand).resolves({ Item: archive('a-1') });
+    s3.on(ListObjectsV2Command).resolves({ Contents: [{ Key: 'stage/a-1/d/composite/file.m3u8' }] });
+    expect((await request('admin', 'DELETE', '/archives/a-1')).statusCode).toBe(200);
+    expect(s3.commandCalls(ListObjectsV2Command)[0]?.args[0].input).toMatchObject({ Bucket: 'recording', Prefix: 'stage/a-1/d/composite/' });
+    expect(s3.commandCalls(DeleteObjectsCommand)[0]?.args[0].input.Delete?.Objects).toEqual([{ Key: 'stage/a-1/d/composite/file.m3u8' }]);
+    expect(ddb.commandCalls(DeleteCommand)[0]?.args[0].input.Key).toEqual({ PK: 'ARCHIVE', SK: 'a-1' });
+  });
+
+  it('signs slide cookies with a custom wildcard policy limited to /files/slides/ (R1-08)', async () => {
     const response = await request('viewer', 'POST', '/files/cookies');
     expect(response.statusCode).toBe(204);
-    expect(response.cookies).toEqual(['CloudFront-Policy=policy; Path=/files/; Max-Age=3600; Secure; HttpOnly; SameSite=Lax', 'CloudFront-Signature=signature; Path=/files/; Max-Age=3600; Secure; HttpOnly; SameSite=Lax', 'CloudFront-Key-Pair-Id=pair; Path=/files/; Max-Age=3600; Secure; HttpOnly; SameSite=Lax']);
+    expect(response.cookies).toEqual(['CloudFront-Policy=policy; Path=/files/slides/; Max-Age=3600; Secure; HttpOnly; SameSite=Strict', 'CloudFront-Signature=signature; Path=/files/slides/; Max-Age=3600; Secure; HttpOnly; SameSite=Strict', 'CloudFront-Key-Pair-Id=pair; Path=/files/slides/; Max-Age=3600; Secure; HttpOnly; SameSite=Strict']);
+    const args = vi.mocked(getSignedCookies).mock.calls[0]?.[0] as { policy: string; keyPairId: string; privateKey: string };
+    expect(JSON.parse(args.policy)).toEqual({ Statement: [{ Resource: 'https://example.cloudfront.net/files/slides/*', Condition: { DateLessThan: { 'AWS:EpochTime': NOW_S + 3600 } } }] });
+    expect(args).toMatchObject({ keyPairId: 'key', privateKey: 'private-key' });
+  });
+
+  it('rejects cookie requests from unvalidated forwarded hosts', async () => {
     const invalidHost = makeEvent('POST', '/files/cookies');
     invalidHost.headers = { 'X-Auth-Token': 'token', 'x-forwarded-host': 'attacker.example.test' };
-    const failure = await createApiHandler({ env, clients, authenticate: vi.fn().mockResolvedValue({ userId: 'user-1', email: '', role: 'viewer', loginMethod: 'email' }) })(invalidHost);
+    const failure = await createApiHandler({ env, clients, authenticate: vi.fn().mockResolvedValue({ userId: 'user-1', username: 'u', role: 'viewer' }) })(invalidHost);
     expect(failure.statusCode).toBe(500);
     expect(data(failure).error?.code).toBe('INTERNAL_ERROR');
+    expect(getSignedCookies).not.toHaveBeenCalled();
   });
 
-  it('invites users, requires a returned username, and validates the invite limit', async () => {
-    const invited = await request('admin', 'POST', '/users/invite', { emails: ['a@example.test', 'b@example.test'], role: 'viewer' });
-    expect(data(invited)).toEqual({ invited: ['a@example.test', 'b@example.test'] });
-    expect(cognito.commandCalls(AdminAddUserToGroupCommand)).toHaveLength(2);
+  it('signs per-archive cookies for published archives only, except for admins (R1-08)', async () => {
+    ddb.on(GetCommand, { Key: { PK: 'ARCHIVE', SK: 'pub' } }).resolves({ Item: archive('pub') });
+    ddb.on(GetCommand, { Key: { PK: 'ARCHIVE', SK: 'priv' } }).resolves({ Item: archive('priv', { published: false }) });
+    ddb.on(GetCommand, { Key: { PK: 'ARCHIVE', SK: 'old' } }).resolves({ Item: archive('old', { retainUntil: '2023-01-01T00:00:00.000Z' }) });
+    const published = await request('viewer', 'POST', '/archives/pub/cookies');
+    expect(published.statusCode).toBe(204);
+    expect(published.cookies?.[0]).toBe('CloudFront-Policy=policy; Path=/files/archives/stage/pub/d/composite/; Max-Age=3600; Secure; HttpOnly; SameSite=Strict');
+    expect(JSON.parse((vi.mocked(getSignedCookies).mock.calls[0]?.[0] as { policy: string }).policy).Statement[0].Resource).toBe('https://example.cloudfront.net/files/archives/stage/pub/d/composite/*');
+    expect((await request('viewer', 'POST', '/archives/priv/cookies')).statusCode).toBe(404);
+    expect((await request('admin', 'POST', '/archives/priv/cookies')).statusCode).toBe(204);
+    expect((await request('viewer', 'POST', '/archives/missing/cookies')).statusCode).toBe(404);
+    expect((await request('admin', 'POST', '/archives/old/cookies')).statusCode).toBe(404);
+    expect(getSignedCookies).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('user management', () => {
+  it('reports partial invite results and keeps going after failures (R1-11)', async () => {
+    cognito.on(AdminCreateUserCommand)
+      .resolvesOnce({ User: { Username: 'a' } })
+      .rejectsOnce(awsError('UsernameExistsException'))
+      .resolvesOnce({ User: {} })
+      .rejectsOnce(awsError('InvalidParameterException'))
+      .resolves({ User: { Username: 'e' } });
+    const emails = ['a@example.test', 'b@example.test', 'c@example.test', 'd@example.test', 'e@example.test'];
+    const response = await request('admin', 'POST', '/users/invite', { emails, role: 'viewer' });
+    expect(response.statusCode).toBe(200);
+    expect(UserInviteResponseSchema.parse(data(response))).toEqual({
+      invited: ['a@example.test', 'e@example.test'],
+      failed: [{ email: 'b@example.test', reason: 'ALREADY_EXISTS' }, { email: 'c@example.test', reason: 'FAILED' }, { email: 'd@example.test', reason: 'INVALID_PARAMETER' }],
+    });
+    expect(cognito.commandCalls(AdminAddUserToGroupCommand).map((call) => call.args[0].input.Username)).toEqual(['a', 'e']);
     const invalid = await request('admin', 'POST', '/users/invite', { emails: [], role: 'viewer' });
     expect(data(invalid).error?.code).toBe('VALIDATION_ERROR');
-    cognito.on(AdminCreateUserCommand).resolves({ User: {} });
-    expect(data(await request('admin', 'POST', '/users/invite', { emails: ['c@example.test'], role: 'viewer' })).error).toMatchObject({ code: 'INVITE_FAILED', message: 'ユーザーを作成できませんでした' });
   });
 
-  it('manages roles and account status with Cognito admin operations', async () => {
+  it('reports a failed group assignment as a failed invite', async () => {
+    cognito.on(AdminAddUserToGroupCommand).rejects(awsError('InternalErrorException'));
+    expect(data(await request('admin', 'POST', '/users/invite', { emails: ['a@example.test'], role: 'camera' }))).toEqual({ invited: [], failed: [{ email: 'a@example.test', reason: 'FAILED' }] });
+  });
+
+  it('changes roles, signs the user out and invalidates issued access tokens (R1-09)', async () => {
     cognito.on(ListUsersCommand).resolves({ Users: [{ Username: 'cognito-user', Attributes: [{ Name: 'sub', Value: 'target' }] }] });
-    cognito.on(AdminListGroupsForUserCommand).resolves({ Groups: [{ GroupName: 'camera' }, { GroupName: 'viewer' }] });
-    expect(data(await request('admin', 'PUT', '/users/target/role', { role: 'presenter' }))).toEqual({ userId: 'target', role: 'presenter', enabled: true });
-    expect(cognito.commandCalls(AdminRemoveUserFromGroupCommand).map((call) => call.args[0].input.GroupName)).toEqual(['camera', 'viewer']);
+    cognito.on(AdminListGroupsForUserCommand).resolves({ Groups: [{ GroupName: 'admin' }, { GroupName: 'viewer' }] });
+    expect(data(await request('admin', 'PUT', '/users/target/role', { role: 'viewer' }))).toEqual({ userId: 'target', role: 'viewer', enabled: true });
+    expect(cognito.commandCalls(AdminRemoveUserFromGroupCommand).map((call) => call.args[0].input.GroupName)).toEqual(['admin', 'viewer']);
+    expect(cognito.commandCalls(AdminAddUserToGroupCommand)[0]?.args[0].input).toMatchObject({ Username: 'cognito-user', GroupName: 'viewer' });
+    expect(cognito.commandCalls(AdminUserGlobalSignOutCommand)[0]?.args[0].input).toEqual({ UserPoolId: 'pool', Username: 'cognito-user' });
+    expect(ddb.commandCalls(PutCommand)[0]?.args[0].input.Item).toEqual({ PK: 'USER#target', SK: 'AUTH', tokenValidAfter: NOW_S });
+  });
+
+  it('disables, enables and deletes users and revokes tokens on disable and delete', async () => {
+    cognito.on(ListUsersCommand).resolves({ Users: [{ Username: 'cognito-user', Attributes: [{ Name: 'sub', Value: 'target' }] }] });
     expect((await request('admin', 'POST', '/users/target/disable')).statusCode).toBe(200);
+    expect(cognito.commandCalls(AdminDisableUserCommand)).toHaveLength(1);
     expect(cognito.commandCalls(AdminUserGlobalSignOutCommand)).toHaveLength(1);
     expect((await request('admin', 'POST', '/users/target/enable')).statusCode).toBe(200);
+    expect(cognito.commandCalls(AdminEnableUserCommand)).toHaveLength(1);
     expect((await request('admin', 'DELETE', '/users/target')).statusCode).toBe(200);
     expect(cognito.commandCalls(AdminDeleteUserCommand)[0]?.args[0].input.Username).toBe('cognito-user');
+    expect(ddb.commandCalls(PutCommand).map((call) => call.args[0].input.Item)).toEqual([
+      { PK: 'USER#target', SK: 'AUTH', tokenValidAfter: NOW_S },
+      { PK: 'USER#target', SK: 'AUTH', tokenValidAfter: NOW_S },
+    ]);
   });
 
-  it('returns users with roles, status, login metadata, and comment suspension', async () => {
-    cognito.on(ListUsersCommand).resolves({ Users: [{ Username: 'c-user', Enabled: true, Attributes: [{ Name: 'sub', Value: 'target' }, { Name: 'email', Value: 'target@example.test' }] }] });
-    cognito.on(AdminListGroupsForUserCommand).resolves({ Groups: [{ GroupName: 'admin' }] });
-    ddb.on(GetCommand).callsFake(async ({ Key }) => Key?.SK === 'PROFILE' ? { Item: { commentSuspended: true } } : { Item: { lastLoginAt: '2026-01-01T00:00:00Z', loginMethod: 'Okta' } });
-    expect(data(await request('admin', 'GET', '/users'))).toEqual([{ userId: 'target', email: 'target@example.test', loginMethod: 'Okta', role: 'admin', enabled: true, commentSuspended: true, lastLoginAt: '2026-01-01T00:00:00Z' }]);
+  it.each([
+    ['PUT', '/users/user-1/role', { role: 'viewer' }],
+    ['POST', '/users/user-1/disable', undefined],
+    ['DELETE', '/users/user-1', undefined],
+  ] as const)('refuses %s %s on the caller itself (R1-19)', async (method, path, body) => {
+    const response = await request('admin', method, path, body);
+    expect(response.statusCode).toBe(400);
+    expect(data(response).error).toEqual({ code: 'CANNOT_MODIFY_SELF', message: '自分自身のアカウントは変更できません' });
+    expect(cognito.commandCalls(ListUsersCommand)).toHaveLength(0);
+    expect(cognito.commandCalls(AdminDisableUserCommand)).toHaveLength(0);
+    expect(cognito.commandCalls(AdminDeleteUserCommand)).toHaveLength(0);
+  });
+
+  it('lists users with one group listing per role and batched DynamoDB reads (R1-24)', async () => {
+    cognito.on(ListUsersCommand).resolves({ Users: [
+      { Username: 'c-user', Enabled: true, Attributes: [{ Name: 'sub', Value: 'target' }, { Name: 'email', Value: 'target@example.test' }] },
+      { Username: 'okta_x', Enabled: false, Attributes: [{ Name: 'sub', Value: 'okta' }, { Name: 'email', Value: 'okta@example.test' }, { Name: 'identities', Value: '[{"providerName":"Okta"}]' }] },
+      { Username: 'multi', Enabled: true, Attributes: [{ Name: 'sub', Value: 'multi' }, { Name: 'email', Value: 'multi@example.test' }] },
+    ] });
+    cognito.on(ListUsersInGroupCommand).callsFake(async ({ GroupName }) => ({ Users: GroupName === 'admin' ? [{ Username: 'c-user' }, { Username: 'multi' }] : GroupName === 'camera' ? [{ Username: 'okta_x' }, { Username: 'multi' }] : [] }));
+    ddb.on(BatchGetCommand).resolves({ Responses: { table: [{ PK: 'USER#target', SK: 'PROFILE', commentSuspended: true }, { PK: 'USER#target', SK: 'LOGIN', lastLoginAt: '2026-01-01T00:00:00.000Z', loginMethod: 'email' }] } });
+    const users = UsersResponseSchema.parse(data(await request('admin', 'GET', '/users')));
+    expect(users).toEqual([
+      { userId: 'target', email: 'target@example.test', loginMethod: 'email', role: 'admin', enabled: true, commentSuspended: true, lastLoginAt: '2026-01-01T00:00:00.000Z' },
+      { userId: 'okta', email: 'okta@example.test', loginMethod: 'Okta', role: 'camera', enabled: false, commentSuspended: false, lastLoginAt: null },
+      { userId: 'multi', email: 'multi@example.test', loginMethod: 'email', role: 'viewer', enabled: true, commentSuspended: false, lastLoginAt: null },
+    ]);
+    expect(cognito.commandCalls(ListUsersInGroupCommand).map((call) => call.args[0].input.GroupName)).toEqual(['admin', 'camera', 'audio', 'presenter', 'viewer']);
+    expect(cognito.commandCalls(AdminListGroupsForUserCommand)).toHaveLength(0);
+    expect(ddb.commandCalls(GetCommand)).toHaveLength(0);
+    expect(ddb.commandCalls(BatchGetCommand)[0]?.args[0].input.RequestItems?.table?.Keys).toHaveLength(6);
+  });
+
+  it('chunks BatchGet requests at 100 keys and retries unprocessed keys', async () => {
+    cognito.on(ListUsersCommand).resolves({ Users: Array.from({ length: 51 }, (_, index) => ({ Username: `u${index}`, Attributes: [{ Name: 'sub', Value: `s${index}` }, { Name: 'email', Value: `u${index}@example.test` }] })) });
+    ddb.on(BatchGetCommand).resolvesOnce({ Responses: { table: [] }, UnprocessedKeys: { table: { Keys: [{ PK: 'USER#s0', SK: 'PROFILE' }] } } }).resolves({ Responses: { table: [] } });
+    expect((await request('admin', 'GET', '/users')).statusCode).toBe(200);
+    expect(ddb.commandCalls(BatchGetCommand).map((call) => call.args[0].input.RequestItems?.table?.Keys?.length)).toEqual([100, 1, 2]);
   });
 });

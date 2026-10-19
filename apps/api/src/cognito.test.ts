@@ -15,10 +15,16 @@ const cognitoPostAuthenticationHandler = createCognitoPostAuthenticationHandler(
 beforeEach(() => { cognito.reset(); ddb.reset(); cognito.on(AdminListGroupsForUserCommand).resolves({ Groups: [] }); cognito.on(AdminAddUserToGroupCommand).resolves({}); ddb.on(PutCommand).resolves({}); });
 
 describe('post authentication hook', () => {
-  it('adds viewer during first external confirmation', async () => {
+  it('adds viewer and records the first login during first external confirmation (R1-20)', async () => {
     const event = { userPoolId: 'pool', userName: 'user', request: { userAttributes: { sub: 'sub', identities: '[{"providerName":"Okta"}]' } }, response: {}, triggerSource: 'PostConfirmation_ConfirmSignUp' };
     await expect(cognitoPostAuthenticationHandler(event)).resolves.toBe(event);
     expect(cognito.commandCalls(AdminAddUserToGroupCommand)[0]?.args[0].input.GroupName).toBe('viewer');
+    expect(ddb.commandCalls(PutCommand).map((call) => call.args[0].input.Item)).toEqual([{ PK: 'USER#sub', SK: 'LOGIN', lastLoginAt: '2023-11-14T22:13:20.000Z', loginMethod: 'Okta' }]);
+  });
+  it('ignores confirmation of non-federated users', async () => {
+    const event = { userPoolId: 'pool', userName: 'user', request: { userAttributes: { sub: 'sub' } }, response: {}, triggerSource: 'PostConfirmation_ConfirmSignUp' };
+    await expect(cognitoPostAuthenticationHandler(event)).resolves.toBe(event);
+    expect(cognito.commandCalls(AdminListGroupsForUserCommand)).toHaveLength(0);
     expect(ddb.commandCalls(PutCommand)).toHaveLength(0);
   });
   it('records last login for an existing role member', async () => {

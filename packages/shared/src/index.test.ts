@@ -6,7 +6,7 @@ import {
   MeResponseSchema, NgWordSchema, normalizeForModeration, RecentCommentsResponseSchema, ROLE_PURPOSES,
   ROLES, RoleSchema, SlideOrderRequestSchema, SlideUploadSchema, SlideUploadUrlResponseSchema, SlidesResponseSchema,
   StagePurposeSchema, StageTokenRequestSchema, StageTokenResponseSchema, StatusResponseSchema, UpdateRoleRequestSchema,
-  UsersResponseSchema, ViewerCountResponseSchema, STAGE_LIMITS, FEATURES,
+  UsersResponseSchema, ViewerCountResponseSchema, STAGE_LIMITS, FEATURES, UserInviteResponseSchema,
 } from './index';
 
 describe('shared schemas', () => {
@@ -89,5 +89,10 @@ describe('shared schemas', () => {
   });
   it('maps each role to post login destination', () => {
     expect(ROLES.map(getPostLoginPath)).toEqual(['/watch', '/send/camera', '/send/mic', '/send/slide', '/watch']);
+  });
+  it('describes partial invite results and rejects unknown failure reasons', () => {
+    expect(UserInviteResponseSchema.parse({ invited: ['a@example.test'], failed: [{ email: 'b@example.test', reason: 'ALREADY_EXISTS' }] })).toEqual({ invited: ['a@example.test'], failed: [{ email: 'b@example.test', reason: 'ALREADY_EXISTS' }] });
+    expect(UserInviteResponseSchema.safeParse({ invited: ['a@example.test'] }).success).toBe(false);
+    expect(UserInviteResponseSchema.safeParse({ invited: [], failed: [{ email: 'b@example.test', reason: 'boom' }] }).success).toBe(false);
   });
 });
