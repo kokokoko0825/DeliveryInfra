@@ -9,6 +9,7 @@ export const HANDLER_DIRS = {
   chatReview: 'chat-review',
   recording: 'recording',
   cognito: 'cognito',
+  archiveExpiry: 'archive-expiry',
 } as const;
 export type HandlerName = keyof typeof HANDLER_DIRS;
 
@@ -25,7 +26,6 @@ export interface ResourceRefs {
   storageConfigurationArn: string;
   encoderConfigurationArn: string;
   cloudFrontKeyPairId: string;
-  cloudFrontKeyGroupId: string;
   cloudFrontPrivateKeyParameter: string;
 }
 
@@ -52,7 +52,6 @@ export function buildLambdaEnvironment(handler: HandlerName, refs: ResourceRefs)
         RECORDING_STORAGE_CONFIGURATION_ARN: refs.storageConfigurationArn,
         ENCODER_CONFIGURATION_ARN: refs.encoderConfigurationArn,
         CLOUDFRONT_KEY_PAIR_ID: refs.cloudFrontKeyPairId,
-        CLOUDFRONT_KEY_GROUP_ID: refs.cloudFrontKeyGroupId,
         CLOUDFRONT_PRIVATE_KEY_PARAMETER: refs.cloudFrontPrivateKeyParameter,
       };
     case 'recording':
@@ -65,6 +64,9 @@ export function buildLambdaEnvironment(handler: HandlerName, refs: ResourceRefs)
     case 'chatReview':
     case 'cognito':
       return base;
+    // TTL で消えたアーカイブ行(Stream の OldImage)から録画 prefix を消すだけなのでテーブルは読まない。
+    case 'archiveExpiry':
+      return { NODE_ENV: base.NODE_ENV, RECORDING_BUCKET: refs.recordingBucket };
   }
 }
 

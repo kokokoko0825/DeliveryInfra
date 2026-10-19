@@ -7,6 +7,8 @@
 export const API_PATH = '/api/*';
 export const FILES_PATH = '/files/*';
 export const ARCHIVES_PATH = '/files/archives/*';
+/** U-02 のダイアログ内 iframe で PDF を表示するため、ここだけ同一オリジンからの埋め込みを許可する(F-SLD-03)。 */
+export const SLIDES_PATH = '/files/slides/*';
 export const FILES_PREFIX = '/files';
 export const ARCHIVES_PREFIX = '/files/archives';
 
@@ -18,8 +20,11 @@ export interface CspInput {
   uploadHost: string;
 }
 
+/** deny: どこからも埋め込み不可(既定)。sameorigin: 同一オリジンの iframe のみ可(スライド PDF)。 */
+export type Framing = 'deny' | 'sameorigin';
+
 /** IVS Real-Time(WebRTC/WSS)・IVS Chat・Cognito を許可した CSP。 */
-export function buildCsp({ region, cognitoDomain, uploadHost }: CspInput): string {
+export function buildCsp({ region, cognitoDomain, uploadHost }: CspInput, framing: Framing = 'deny'): string {
   const directives: Record<string, string[]> = {
     'default-src': ["'self'"],
     'script-src': ["'self'", "'wasm-unsafe-eval'"],
@@ -38,7 +43,7 @@ export function buildCsp({ region, cognitoDomain, uploadHost }: CspInput): strin
       `https://${uploadHost}`,
     ],
     'form-action': ["'self'", `https://${cognitoDomain}`],
-    'frame-ancestors': ["'none'"],
+    'frame-ancestors': [framing === 'deny' ? "'none'" : "'self'"],
     'base-uri': ["'self'"],
     'object-src': ["'none'"],
   };
@@ -47,12 +52,12 @@ export function buildCsp({ region, cognitoDomain, uploadHost }: CspInput): strin
     .join('; ');
 }
 
-export function buildSecurityHeaders(csp: string): Record<string, string> {
+export function buildSecurityHeaders(csp: string, framing: Framing = 'deny'): Record<string, string> {
   return {
     'strict-transport-security': 'max-age=63072000; includeSubDomains',
     'content-security-policy': csp,
     'x-content-type-options': 'nosniff',
-    'x-frame-options': 'DENY',
+    'x-frame-options': framing === 'deny' ? 'DENY' : 'SAMEORIGIN',
     'referrer-policy': 'strict-origin-when-cross-origin',
     'permissions-policy': 'camera=(self), microphone=(self), display-capture=(self), geolocation=()',
   };

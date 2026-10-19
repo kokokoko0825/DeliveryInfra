@@ -14,12 +14,12 @@ const MANAGED = {
 };
 /** cdk.json の feature flag をテストにも適用する。 */
 const CDK_CONTEXT = (JSON.parse(readFileSync(path.join(INFRA_ROOT, 'cdk.json'), 'utf8')) as { context: Record<string, unknown> }).context;
-const OUR_FUNCTIONS = ['ApiFunction', 'ChatReviewFunction', 'RecordingFunction', 'CognitoFunction'];
+const OUR_FUNCTIONS = ['ApiFunction', 'ChatReviewFunction', 'RecordingFunction', 'CognitoFunction', 'ArchiveExpiryFunction'];
 
 function fixtures() {
   const root = mkdtempSync(path.join(tmpdir(), 'infra-test-'));
   const api = path.join(root, 'api');
-  for (const dir of ['index', 'chat-review', 'recording', 'cognito']) {
+  for (const dir of ['index', 'chat-review', 'recording', 'cognito', 'archive-expiry']) {
     mkdirSync(path.join(api, dir), { recursive: true });
     writeFileSync(path.join(api, dir, 'index.mjs'), 'export const handler = async () => ({});\n');
   }
@@ -116,7 +116,28 @@ describe('stg(既定)', () => {
         TimeToLiveSpecification: { AttributeName: 'ttl', Enabled: true },
         SSESpecification: { SSEEnabled: true, SSEType: 'KMS' },
         GlobalSecondaryIndexes: Match.absent(),
+        StreamSpecification: { StreamViewType: 'OLD_IMAGE' },
       });
+    });
+    it('Stream は TTL で消えたアーカイブ行だけを archive-expiry に渡す', () => {
+      t.main.resourceCountIs('AWS::Lambda::EventSourceMapping', 1);
+      const [[, mapping]] = resourcesOf(t.main, 'AWS::Lambda::EventSourceMapping') as [
+        [string, { Properties: { FunctionName: unknown; FilterCriteria: { Filters: { Pattern: string }[] } } & Record<string, unknown> }],
+      ];
+      expect(mapping.Properties.FunctionName).toEqual({ Ref: expect.stringMatching(/^ArchiveExpiryFunction/) });
+      expect(mapping.Properties).toMatchObject({
+        StartingPosition: 'TRIM_HORIZON',
+        BisectBatchOnFunctionError: true,
+        FunctionResponseTypes: ['ReportBatchItemFailures'],
+        MaximumRetryAttempts: 5,
+      });
+      expect(mapping.Properties.FilterCriteria.Filters.map((f) => JSON.parse(f.Pattern))).toEqual([
+        {
+          eventName: ['REMOVE'],
+          userIdentity: { type: ['Service'], principalId: ['dynamodb.amazonaws.com'] },
+          dynamodb: { OldImage: { recordingPrefix: { S: [{ exists: true }] } } },
+        },
+      ]);
     });
   });
 
@@ -148,14 +169,11 @@ describe('stg(既定)', () => {
         );
       }
     });
-    it('ライフサイクル: 録画は Intelligent-Tiering で365日、チャットログ365日、アクセスログ90日、CloudTrail365日', () => {
+    it('ライフサイクル: 録画は Intelligent-Tiering のみ(期限削除なし)、チャットログ365日、アクセスログ90日、CloudTrail365日', () => {
       t.main.hasResourceProperties('AWS::S3::Bucket', {
         LifecycleConfiguration: {
           Rules: [
-            Match.objectLike({
-              ExpirationInDays: 365,
-              Transitions: [{ StorageClass: 'INTELLIGENT_TIERING', TransitionInDays: 0 }],
-            }),
+            { Id: 'archives-intelligent-tiering', Status: 'Enabled', Transitions: [{ StorageClass: 'INTELLIGENT_TIERING', TransitionInDays: 0 }] },
           ],
         },
       });
@@ -236,7 +254,7 @@ describe('stg(既定)', () => {
         { Properties: Record<string, unknown> },
       ][];
     it('nodejs22.x / arm64 / ビルド済みコード', () => {
-      expect(ours()).toHaveLength(4);
+      expect(ours()).toHaveLength(5);
       for (const [, fn] of ours()) {
         expect(fn.Properties).toMatchObject({ Runtime: 'nodejs22.x', Architectures: ['arm64'], Handler: 'index.handler' });
         expect(fn.Properties.Code).toHaveProperty('S3Key');
@@ -260,6 +278,8 @@ describe('stg(既定)', () => {
       expect(Object.keys(env('CognitoFunction')).sort()).toEqual(['NODE_ENV', 'TABLE_NAME']);
       expect(env('ApiFunction')).toMatchObject({ CLOUDFRONT_PRIVATE_KEY_PARAMETER: '/delivery-stg/cloudfront/private-key' });
       expect(env('ApiFunction')).not.toHaveProperty('CLOUDFRONT_DOMAIN');
+      expect(env('ApiFunction')).not.toHaveProperty('CLOUDFRONT_KEY_GROUP_ID');
+      expect(Object.keys(env('ArchiveExpiryFunction')).sort()).toEqual(['NODE_ENV', 'RECORDING_BUCKET']);
     });
   });
 
@@ -282,6 +302,41 @@ describe('stg(既定)', () => {
         if (s.id.startsWith('ApiFunction')) expect(s.Action).toBe('ivs:ListCompositions');
         else expect(s.id).toMatch(/^(AWS|Custom|CustomCDKBucketDeployment)/);
       }
+    });
+    const policyOf = (prefix: string) =>
+      statements()
+        .filter((s) => s.id.startsWith(prefix))
+        .map((s) => ({ Effect: (s as { Effect?: string }).Effect, Action: s.Action, Resource: s.Resource }));
+    it('api: /api/status に必要な IVS/IVS Chat の読み取りと端末切断をステージ/ルームに限定', () => {
+      const stages = [0, 1, 2].map(() => ({ 'Fn::GetAtt': [expect.stringMatching(/^Stage/), 'Arn'] }));
+      expect(policyOf('ApiFunction')).toContainEqual({
+        Effect: 'Allow',
+        Action: ['ivs:CreateParticipantToken', 'ivs:DisconnectParticipant', 'ivs:GetStage', 'ivs:ListParticipants', 'ivs:ListStageSessions'],
+        Resource: stages,
+      });
+      expect(policyOf('ApiFunction')).toContainEqual(
+        expect.objectContaining({ Action: expect.arrayContaining(['ivschat:GetRoom']), Resource: { 'Fn::GetAtt': [expect.stringMatching(/^ChatRoom/), 'Arn'] } }),
+      );
+    });
+    it('recording: GetComposition は composition/* のみ', () => {
+      expect(policyOf('RecordingFunction')).toContainEqual({
+        Effect: 'Allow',
+        Action: 'ivs:GetComposition',
+        Resource: 'arn:aws:ivs:ap-northeast-1:123456789012:composition/*',
+      });
+    });
+    it('archive-expiry: 録画バケットの一覧・削除と Stream 読み取りだけ', () => {
+      const recording = expect.stringMatching(/^RecordingBucket/);
+      const actions = policyOf('ArchiveExpiryFunction').flatMap((s) => [s.Action].flat());
+      expect(actions.sort()).toEqual(
+        ['dynamodb:DescribeStream', 'dynamodb:GetRecords', 'dynamodb:GetShardIterator', 'dynamodb:ListStreams', 's3:DeleteObject', 's3:ListBucket'].sort(),
+      );
+      expect(policyOf('ArchiveExpiryFunction')).toContainEqual({ Effect: 'Allow', Action: 's3:ListBucket', Resource: { 'Fn::GetAtt': [recording, 'Arn'] } });
+      expect(policyOf('ArchiveExpiryFunction')).toContainEqual({
+        Effect: 'Allow',
+        Action: 's3:DeleteObject',
+        Resource: { 'Fn::Join': ['', [{ 'Fn::GetAtt': [recording, 'Arn'] }, '/*']] },
+      });
     });
     it('秘密鍵パラメータは1件に限定して読む', () => {
       t.main.hasResourceProperties('AWS::IAM::Policy', {
@@ -329,8 +384,9 @@ describe('stg(既定)', () => {
       ).toHaveLength(3);
     });
     it('ビヘイビアの順序と /files/* の trusted key group', () => {
-      expect(config().CacheBehaviors.map((b) => b.PathPattern)).toEqual(['/api/*', '/files/archives/*', '/files/*']);
-      for (const pattern of ['/files/archives/*', '/files/*']) {
+      expect(config().CacheBehaviors.map((b) => b.PathPattern)).toEqual(['/api/*', '/files/archives/*', '/files/slides/*', '/files/*']);
+      expect(behavior('/files/slides/*').TargetOriginId).toBe(behavior('/files/*').TargetOriginId);
+      for (const pattern of ['/files/archives/*', '/files/slides/*', '/files/*']) {
         expect(behavior(pattern)).toMatchObject({
           TrustedKeyGroups: [{ Ref: expect.stringMatching(/^FilesKeyGroup/) }],
           CachePolicyId: MANAGED.cachingOptimized,
@@ -353,15 +409,23 @@ describe('stg(既定)', () => {
       const defaults = config().DefaultCacheBehavior as { FunctionAssociations: { EventType: string }[] };
       expect(defaults.FunctionAssociations.map((f) => f.EventType)).toEqual(['viewer-request', 'viewer-response']);
     });
-    it('全ビヘイビアでセキュリティヘッダーを付与', () => {
+    it('全ビヘイビアでセキュリティヘッダーを付与し、同一オリジンの埋め込みは /files/slides/* だけ許可', () => {
       const all = [config().DefaultCacheBehavior as Record<string, unknown>, ...config().CacheBehaviors];
-      const refs = all.map(
-        (b) => (b.FunctionAssociations as { EventType: string; FunctionARN: unknown }[]).find((f) => f.EventType === 'viewer-response')!.FunctionARN,
-      );
-      expect(new Set(refs.map((r) => JSON.stringify(r))).size).toBe(1);
-      t.main.hasResourceProperties('AWS::CloudFront::Function', {
-        FunctionCode: Match.objectLike({ 'Fn::Join': ['', Match.arrayWith([Match.stringLikeRegexp('frame-ancestors')])] }),
-      });
+      const responseFn = (b: Record<string, unknown>) =>
+        JSON.stringify((b.FunctionAssociations as { EventType: string; FunctionARN: unknown }[]).find((f) => f.EventType === 'viewer-response')!.FunctionARN);
+      const code = (fnRef: string) => {
+        const [[, fn]] = resourcesOf(t.main, 'AWS::CloudFront::Function').filter(([id]) => fnRef.includes(`"${id}"`)) as [[string, { Properties: { FunctionCode: unknown } }]];
+        return JSON.stringify(fn.Properties.FunctionCode);
+      };
+      const slides = responseFn(behavior('/files/slides/*'));
+      const others = all.filter((b) => b.PathPattern !== '/files/slides/*').map(responseFn);
+      expect(new Set(others).size).toBe(1);
+      expect(slides).not.toBe(others[0]);
+      expect(code(others[0]!)).toContain("frame-ancestors 'none'");
+      expect(code(others[0]!)).toContain('\\"x-frame-options\\":\\"DENY\\"');
+      expect(code(slides)).toContain("frame-ancestors 'self'");
+      expect(code(slides)).not.toContain("frame-ancestors 'none'");
+      expect(code(slides)).toContain('\\"x-frame-options\\":\\"SAMEORIGIN\\"');
     });
     it('WAF を関連付け、無料プランで使えないカスタムポリシーを作らない', () => {
       expect(config().WebACLId).toBeDefined();
@@ -388,7 +452,16 @@ describe('stg(既定)', () => {
           Match.objectLike({ Name: 'AWSManagedRulesCommonRuleSet' }),
           Match.objectLike({ Name: 'AWSManagedRulesKnownBadInputsRuleSet' }),
           Match.objectLike({ Name: 'AWSManagedRulesAmazonIpReputationList' }),
-          Match.objectLike({ Name: 'RateLimitPerIp', Statement: { RateBasedStatement: Match.objectLike({ AggregateKeyType: 'IP' }) } }),
+          Match.objectLike({
+            Name: 'RateLimitPerIp',
+            Statement: {
+              RateBasedStatement: Match.objectLike({
+                AggregateKeyType: 'IP',
+                Limit: 15_000,
+                ScopeDownStatement: { ByteMatchStatement: Match.objectLike({ PositionalConstraint: 'STARTS_WITH', SearchString: '/api/' }) },
+              }),
+            },
+          }),
         ],
       });
     });

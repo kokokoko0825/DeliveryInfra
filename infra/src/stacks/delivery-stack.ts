@@ -20,6 +20,7 @@ import {
   aws_ivs as ivs,
   aws_ivschat as ivschat,
   aws_lambda as lambda,
+  aws_lambda_event_sources as eventSources,
   aws_logs as logs,
   aws_s3 as s3,
   aws_s3_deployment as s3deploy,
@@ -41,6 +42,7 @@ import {
   ARCHIVES_PREFIX,
   FILES_PATH,
   FILES_PREFIX,
+  SLIDES_PATH,
   buildCsp,
   buildSecurityHeaders,
   forwardedHostFunctionCode,
@@ -55,6 +57,15 @@ export const ROLE_GROUPS = ['admin', 'camera', 'audio', 'presenter', 'viewer'] a
 export const OKTA_PROVIDER_NAME = 'Okta';
 /** 番組映像(要件 5.1): 720p / 30fps / 約2.5Mbps */
 export const ENCODER_VIDEO = { width: 1280, height: 720, framerate: 30, bitrate: 2_500_000 };
+/**
+ * archive-expiry に渡す Stream レコード(R1-22)。TTL による削除だけを通し、管理者の削除(API が録画も消す)は除く。
+ * キー設計に依存しないよう、OldImage に recordingPrefix(String)を持つ行=アーカイブ行で判定する。
+ */
+export const ARCHIVE_EXPIRY_FILTER = {
+  eventName: lambda.FilterRule.isEqual('REMOVE'),
+  userIdentity: { type: lambda.FilterRule.isEqual('Service'), principalId: lambda.FilterRule.isEqual('dynamodb.amazonaws.com') },
+  dynamodb: { OldImage: { recordingPrefix: { S: lambda.FilterRule.exists() } } },
+};
 
 export interface DeliveryStackProps extends StackProps {
   config: DeliveryConfig;
@@ -104,11 +115,11 @@ export class DeliveryStack extends Stack {
     // IVS コンポジット録画は <stageId>/<sessionId>/... 固定のキーで書くため専用バケットにする。
     const recordingBucket = secureBucket('RecordingBucket', {
       ...accessLogs('recording'),
+      // 期限での一律削除はしない(管理者が延長できるため)。削除は Archive.retainUntil → TTL → archive-expiry で行う。
       lifecycleRules: [
         {
-          id: 'archives-365d',
+          id: 'archives-intelligent-tiering',
           transitions: [{ storageClass: s3.StorageClass.INTELLIGENT_TIERING, transitionAfter: Duration.days(0) }],
-          expiration: Duration.days(365),
         },
       ],
     });
@@ -151,6 +162,8 @@ export class DeliveryStack extends Stack {
       billing: dynamodb.Billing.onDemand(),
       encryption: dynamodb.TableEncryptionV2.awsManagedKey(),
       timeToLiveAttribute: 'ttl',
+      // TTL で消えたアーカイブ行の recordingPrefix を archive-expiry が読むため削除前の値だけ流す。
+      dynamoStream: dynamodb.StreamViewType.OLD_IMAGE,
       removalPolicy,
       deletionProtection: config.retainData,
     });
@@ -185,6 +198,7 @@ export class DeliveryStack extends Stack {
     const chatReviewFn = makeFunction('chatReview', 256, Duration.seconds(3));
     const recordingFn = makeFunction('recording', 256, Duration.seconds(30));
     const cognitoFn = makeFunction('cognito', 256, Duration.seconds(5));
+    const archiveExpiryFn = makeFunction('archiveExpiry', 256, Duration.seconds(60));
 
     // ---------- Cognito ----------
     const userPool = new cognito.UserPool(this, 'UserPool', {
@@ -301,7 +315,6 @@ export class DeliveryStack extends Stack {
       storageConfigurationArn: storage.attrArn,
       encoderConfigurationArn: encoder.attrArn,
       cloudFrontKeyPairId: publicKey.publicKeyId,
-      cloudFrontKeyGroupId: keyGroup.keyGroupId,
       cloudFrontPrivateKeyParameter: config.cloudFrontPrivateKeyParameter,
     };
     const functions: Record<HandlerName, lambda.Function> = {
@@ -309,6 +322,7 @@ export class DeliveryStack extends Stack {
       chatReview: chatReviewFn,
       recording: recordingFn,
       cognito: cognitoFn,
+      archiveExpiry: archiveExpiryFn,
     };
     for (const [name, fn] of Object.entries(functions) as [HandlerName, lambda.Function][]) {
       for (const [key, value] of Object.entries(buildLambdaEnvironment(name, refs))) fn.addEnvironment(key, value);
@@ -340,7 +354,14 @@ export class DeliveryStack extends Stack {
     );
     apiFn.addToRolePolicy(
       new iam.PolicyStatement({
-        actions: ['ivs:CreateParticipantToken', 'ivs:GetStage', 'ivs:ListParticipants'],
+        // ListStageSessions は /api/status(R1-06)、DisconnectParticipant は失効した端末枠の切断(R1-07)。
+        actions: [
+          'ivs:CreateParticipantToken',
+          'ivs:GetStage',
+          'ivs:ListStageSessions',
+          'ivs:ListParticipants',
+          'ivs:DisconnectParticipant',
+        ],
         resources: stageArns,
       }),
     );
@@ -380,6 +401,24 @@ export class DeliveryStack extends Stack {
       new iam.PolicyStatement({ actions: ['s3:GetObject'], resources: [recordingBucket.arnForObjects('*')] }),
     );
     recordingFn.addToRolePolicy(new iam.PolicyStatement({ actions: ['ivschat:SendEvent'], resources: [chatRoom.attrArn] }));
+    // recordingPrefix が保存されていないときに GetComposition で補完する(R1-21)。
+    recordingFn.addToRolePolicy(new iam.PolicyStatement({ actions: ['ivs:GetComposition'], resources: [compositionArn] }));
+
+    // 期限切れアーカイブの録画 prefix を消す(R1-22)。Stream の読み取り権限はイベントソースが付与する。
+    archiveExpiryFn.addToRolePolicy(new iam.PolicyStatement({ actions: ['s3:ListBucket'], resources: [recordingBucket.bucketArn] }));
+    archiveExpiryFn.addToRolePolicy(
+      new iam.PolicyStatement({ actions: ['s3:DeleteObject'], resources: [recordingBucket.arnForObjects('*')] }),
+    );
+    archiveExpiryFn.addEventSource(
+      new eventSources.DynamoEventSource(table, {
+        startingPosition: lambda.StartingPosition.TRIM_HORIZON,
+        filters: [lambda.FilterCriteria.filter(ARCHIVE_EXPIRY_FILTER)],
+        batchSize: 10,
+        bisectBatchOnError: true,
+        reportBatchItemFailures: true,
+        retryAttempts: 5,
+      }),
+    );
 
     new events.Rule(this, 'CompositionStateChange', {
       eventPattern: { source: ['aws.ivs'], detailType: ['IVS Composition State Change'] },
@@ -393,17 +432,25 @@ export class DeliveryStack extends Stack {
         code: cloudfront.FunctionCode.fromInline(code),
         runtime: cloudfront.FunctionRuntime.JS_2_0,
       });
-    const csp = buildCsp({ region: this.region, cognitoDomain, uploadHost: contentBucket.bucketRegionalDomainName });
-    const headersFn = cfFunction('SecurityHeadersFunction', securityHeadersFunctionCode(buildSecurityHeaders(csp)));
-    const viewerResponse = { function: headersFn, eventType: cloudfront.FunctionEventType.VIEWER_RESPONSE };
+    const cspInput = { region: this.region, cognitoDomain, uploadHost: contentBucket.bucketRegionalDomainName };
+    const headersFn = cfFunction('SecurityHeadersFunction', securityHeadersFunctionCode(buildSecurityHeaders(buildCsp(cspInput))));
+    const slideHeadersFn = cfFunction(
+      'SlideSecurityHeadersFunction',
+      securityHeadersFunctionCode(buildSecurityHeaders(buildCsp(cspInput, 'sameorigin'), 'sameorigin')),
+    );
+    const viewerResponseOf = (fn: cloudfront.Function) => ({ function: fn, eventType: cloudfront.FunctionEventType.VIEWER_RESPONSE });
+    const viewerResponse = viewerResponseOf(headersFn);
     const viewerRequest = (fn: cloudfront.Function) => ({ function: fn, eventType: cloudfront.FunctionEventType.VIEWER_REQUEST });
-    const signedFiles = (bucket: s3.IBucket, stripFn: cloudfront.Function): cloudfront.BehaviorOptions => ({
-      origin: origins.S3BucketOrigin.withOriginAccessControl(bucket),
+    const signedFiles = (origin: cloudfront.IOrigin, stripFn: cloudfront.Function, responseFn = headersFn): cloudfront.BehaviorOptions => ({
+      origin,
       viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
       cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
       trustedKeyGroups: [keyGroup],
-      functionAssociations: [viewerRequest(stripFn), viewerResponse],
+      functionAssociations: [viewerRequest(stripFn), viewerResponseOf(responseFn)],
     });
+    // /files/slides/* と /files/* は同じオリジン(OAC 1つ)と書き換え関数を共有し、応答ヘッダーだけ変える。
+    const contentOrigin = origins.S3BucketOrigin.withOriginAccessControl(contentBucket);
+    const stripFilesFn = cfFunction('StripFilesPrefixFunction', stripPrefixFunctionCode(FILES_PREFIX));
 
     this.distribution = new cloudfront.Distribution(this, 'Distribution', {
       comment: `${config.prefix} delivery`,
@@ -427,8 +474,9 @@ export class DeliveryStack extends Stack {
           functionAssociations: [viewerRequest(cfFunction('ForwardedHostFunction', forwardedHostFunctionCode())), viewerResponse],
         },
         // /files/* より先に評価させるため先に定義する。
-        [ARCHIVES_PATH]: signedFiles(recordingBucket, cfFunction('StripArchivesPrefixFunction', stripPrefixFunctionCode(ARCHIVES_PREFIX))),
-        [FILES_PATH]: signedFiles(contentBucket, cfFunction('StripFilesPrefixFunction', stripPrefixFunctionCode(FILES_PREFIX))),
+        [ARCHIVES_PATH]: signedFiles(origins.S3BucketOrigin.withOriginAccessControl(recordingBucket), cfFunction('StripArchivesPrefixFunction', stripPrefixFunctionCode(ARCHIVES_PREFIX))),
+        [SLIDES_PATH]: signedFiles(contentOrigin, stripFilesFn, slideHeadersFn),
+        [FILES_PATH]: signedFiles(contentOrigin, stripFilesFn),
       },
     });
     const cloudFrontDomain = this.distribution.distributionDomainName;

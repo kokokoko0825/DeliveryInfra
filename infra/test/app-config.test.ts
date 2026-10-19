@@ -21,7 +21,6 @@ const refs: ResourceRefs = {
   storageConfigurationArn: 'storage',
   encoderConfigurationArn: 'encoder',
   cloudFrontKeyPairId: 'kp',
-  cloudFrontKeyGroupId: 'kg',
   cloudFrontPrivateKeyParameter: '/p/key',
 };
 
@@ -41,7 +40,6 @@ describe('buildLambdaEnvironment', () => {
       RECORDING_STORAGE_CONFIGURATION_ARN: 'storage',
       ENCODER_CONFIGURATION_ARN: 'encoder',
       CLOUDFRONT_KEY_PAIR_ID: 'kp',
-      CLOUDFRONT_KEY_GROUP_ID: 'kg',
       CLOUDFRONT_PRIVATE_KEY_PARAMETER: '/p/key',
     });
   });
@@ -53,6 +51,12 @@ describe('buildLambdaEnvironment', () => {
       CHAT_ROOM_ARN: 'room',
       STAGE_BROADCAST_ARN: 'stage-broadcast',
     });
+  });
+  it('api に未使用の CLOUDFRONT_KEY_GROUP_ID を渡さない', () => {
+    expect(buildLambdaEnvironment('api', refs)).not.toHaveProperty('CLOUDFRONT_KEY_GROUP_ID');
+  });
+  it('archiveExpiry は録画バケットのみ(テーブルは Stream の OldImage で足りる)', () => {
+    expect(buildLambdaEnvironment('archiveExpiry', refs)).toEqual({ NODE_ENV: 'production', RECORDING_BUCKET: 'recording' });
   });
   it.each(['chatReview', 'cognito'] as const)('%s はトリガー元の ID を受け取らない(循環参照回避)', (name) => {
     expect(buildLambdaEnvironment(name, refs)).toEqual({ NODE_ENV: 'production', TABLE_NAME: 'table' });
@@ -66,7 +70,13 @@ describe('buildLambdaEnvironment', () => {
 
 describe('HANDLER_DIRS', () => {
   it('apps/api の dist ディレクトリ名に対応', () =>
-    expect(HANDLER_DIRS).toEqual({ api: 'index', chatReview: 'chat-review', recording: 'recording', cognito: 'cognito' }));
+    expect(HANDLER_DIRS).toEqual({
+      api: 'index',
+      chatReview: 'chat-review',
+      recording: 'recording',
+      cognito: 'cognito',
+      archiveExpiry: 'archive-expiry',
+    }));
 });
 
 describe('buildRuntimeConfig', () => {

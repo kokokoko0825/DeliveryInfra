@@ -52,7 +52,22 @@ describe('buildCsp', () => {
   });
 });
 
+describe('buildCsp(sameorigin)', () => {
+  it('スライド PDF 用は frame-ancestors だけを self にし、他の指令は同じ', () => {
+    const deny = buildCsp(input);
+    const same = buildCsp(input, 'sameorigin');
+    expect(same).toContain("frame-ancestors 'self'");
+    expect(same).not.toContain("frame-ancestors 'none'");
+    expect(same.replace("frame-ancestors 'self'", "frame-ancestors 'none'")).toBe(deny);
+  });
+});
+
 describe('buildSecurityHeaders', () => {
+  it('sameorigin は X-Frame-Options だけ SAMEORIGIN', () => {
+    const deny = buildSecurityHeaders('csp-value');
+    expect(buildSecurityHeaders('csp-value', 'sameorigin')).toEqual({ ...deny, 'x-frame-options': 'SAMEORIGIN' });
+    expect(buildSecurityHeaders('csp-value', 'deny')).toEqual(deny);
+  });
   it('HSTS・CSP・nosniff・フレーム禁止などを含む', () => {
     expect(buildSecurityHeaders('csp-value')).toEqual({
       'strict-transport-security': 'max-age=63072000; includeSubDomains',
