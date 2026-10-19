@@ -42,6 +42,9 @@ describe('shared schemas', () => {
     expect(BroadcastStartRequestSchema.safeParse({ title: '' }).success).toBe(false);
     expect(StageTokenRequestSchema.safeParse({ purpose: 'camera', deviceName: 'x'.repeat(17) }).success).toBe(false);
     expect(StageTokenResponseSchema.safeParse({ tokens: [] }).success).toBe(false);
+    const token = { stage: 'broadcast', token: 't', participantId: 'p', capabilities: ['SUBSCRIBE'], expiresAt: '2026-10-19T00:00:00.000Z' };
+    expect(StageTokenResponseSchema.safeParse({ tokens: [token] }).success).toBe(true);
+    expect(StageTokenResponseSchema.safeParse({ tokens: [{ ...token, stage: 'arn:aws:ivs:ap-northeast-1:1:stage/x' }] }).success).toBe(false);
     expect(CommentSuspensionRequestSchema.safeParse({ suspended: 'yes' }).success).toBe(false);
     expect(SlideOrderRequestSchema.safeParse({ ids: ['a'] }).success).toBe(true);
     expect(SlideUploadUrlResponseSchema.safeParse({ slideId: 's1', url: 'https://example.test', fields: {} }).success).toBe(true);

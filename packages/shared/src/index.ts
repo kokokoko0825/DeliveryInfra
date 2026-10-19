@@ -25,7 +25,10 @@ export const SlideUploadSchema = z.object({
   contentType: z.literal('application/pdf'),
 }).refine(({ fileName }) => fileName.toLowerCase().endsWith('.pdf'), { message: 'PDF 拡張子が必要です', path: ['fileName'] });
 export const StageTokenRequestSchema = z.object({ purpose: StagePurposeSchema, deviceName: DeviceNameSchema.optional() });
-export const StageTokenSchema = z.object({ stage: z.string().min(1), token: z.string().min(1), participantId: z.string().min(1), capabilities: z.array(z.string()), expiresAt: z.string().datetime() });
+export const STAGE_NAMES = ['production', 'slide', 'broadcast'] as const;
+export const StageNameSchema = z.enum(STAGE_NAMES);
+export type StageName = z.infer<typeof StageNameSchema>;
+export const StageTokenSchema = z.object({ stage: StageNameSchema, token: z.string().min(1), participantId: z.string().min(1), capabilities: z.array(z.string()), expiresAt: z.string().datetime() });
 export const StageTokenResponseSchema = z.object({ tokens: z.array(StageTokenSchema).min(1), deviceId: z.string().optional() });
 export const ApiErrorSchema = z.object({ error: z.object({ code: z.string(), message: z.string() }) });
 export type ApiError = z.infer<typeof ApiErrorSchema>;
