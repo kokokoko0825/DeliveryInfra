@@ -1,0 +1,93 @@
+import { z } from 'zod';
+import { RoleSchema, StagePurposeSchema } from './permissions';
+import { COMMENT_HISTORY_LIMIT } from './moderation';
+export * from './permissions';
+export * from './moderation';
+
+export const CHAT_EVENTS = ['broadcast-started', 'broadcast-ended', 'slides-updated', 'archives-updated'] as const;
+export const CHAT_EVENT_NAMES = CHAT_EVENTS;
+export const DISPLAY_NAME_MIN = 1;
+export const DISPLAY_NAME_MAX = 20;
+export const COMMENT_MIN = 1;
+export const COMMENT_MAX = 200;
+export const SLIDE_MAX_BYTES = 50 * 1024 * 1024;
+export const SLIDE_TITLE_MAX = 100;
+export const TOKEN_TTL_SECONDS = 600;
+
+const hasControlChars = (value: string) => /[\u0000-\u001f\u007f-\u009f]/u.test(value);
+export const DisplayNameSchema = z.string().trim().min(DISPLAY_NAME_MIN).max(DISPLAY_NAME_MAX).refine((v) => !hasControlChars(v), '制御文字は使用できません');
+export const CommentSchema = z.string().min(COMMENT_MIN).max(COMMENT_MAX);
+export const TitleSchema = z.string().trim().min(1).max(SLIDE_TITLE_MAX);
+export const DeviceNameSchema = z.string().min(1).max(16).regex(/^[A-Za-z0-9-]+$/);
+export const SuggestedDeviceNameSchema = z.string().regex(/^(CAM|MIC)[1-9]$/);
+export const SlideUploadSchema = z.object({
+  title: TitleSchema, fileName: z.string().min(1), size: z.number().int().min(1).max(SLIDE_MAX_BYTES),
+  contentType: z.literal('application/pdf'),
+}).refine(({ fileName }) => fileName.toLowerCase().endsWith('.pdf'), { message: 'PDF 拡張子が必要です', path: ['fileName'] });
+export const StageTokenRequestSchema = z.object({ purpose: StagePurposeSchema, deviceName: DeviceNameSchema.optional() });
+export const StageTokenSchema = z.object({ stage: z.string().min(1), token: z.string().min(1), participantId: z.string().min(1), capabilities: z.array(z.string()), expiresAt: z.string().datetime() });
+export const StageTokenResponseSchema = z.object({ tokens: z.array(StageTokenSchema).min(1), deviceId: z.string().optional() });
+export const ApiErrorSchema = z.object({ error: z.object({ code: z.string(), message: z.string() }) });
+export type ApiError = z.infer<typeof ApiErrorSchema>;
+export const ApiErrorResponseSchema = ApiErrorSchema;
+export const MeResponseSchema = z.object({ userId: z.string(), email: z.string().email(), role: RoleSchema, loginMethod: z.string(), displayName: DisplayNameSchema.nullable(), commentSuspended: z.boolean() });
+export const BroadcastSchema = z.object({ id: z.string(), title: z.string(), status: z.enum(['idle', 'live', 'ended']), startedAt: z.string().datetime().nullable(), endedAt: z.string().datetime().nullable() });
+export const BroadcastResponseSchema = BroadcastSchema.nullable();
+export const ViewerCountResponseSchema = z.object({ viewerCount: z.number().int().nonnegative() });
+export const DisplayNameRequestSchema = z.object({ displayName: DisplayNameSchema });
+export const BroadcastStartRequestSchema = z.object({ title: TitleSchema });
+export const DeviceListResponseSchema = z.array(z.object({ deviceId: z.string(), deviceName: DeviceNameSchema, kind: z.enum(['camera', 'mic', 'slide']), userId: z.string(), connected: z.boolean() }));
+export const CommentSchemaResponse = z.object({ messageId: z.string(), userId: z.string(), displayName: DisplayNameSchema, comment: CommentSchema, sentAt: z.string().datetime(), deleted: z.boolean() });
+export const RecentCommentsResponseSchema = z.array(CommentSchemaResponse).max(COMMENT_HISTORY_LIMIT);
+export const CommentSuspensionRequestSchema = z.object({ suspended: z.boolean() });
+export const NgWordSchema = z.string().trim().min(1).max(100);
+export const NgWordRequestSchema = z.object({ word: NgWordSchema });
+export const NgWordsResponseSchema = z.array(NgWordSchema);
+export const SlideSchema = z.object({ id: z.string(), title: TitleSchema, fileName: z.string(), size: z.number().int().positive(), order: z.number().int().nonnegative() });
+export const SlidesResponseSchema = z.array(SlideSchema);
+export const SlideOrderRequestSchema = z.object({ ids: z.array(z.string()) });
+export const SlideUpdateRequestSchema = z.object({ title: TitleSchema });
+export const SlideUploadUrlResponseSchema = z.object({ url: z.string().url(), fields: z.record(z.string()) });
+export const ArchiveSchema = z.object({ id: z.string(), title: TitleSchema, published: z.boolean(), durationSeconds: z.number().nonnegative() });
+export const ArchivesResponseSchema = z.array(ArchiveSchema);
+export const InviteUsersRequestSchema = z.object({ emails: z.array(z.string().email()).min(1).max(100), role: RoleSchema });
+export const UpdateRoleRequestSchema = z.object({ role: RoleSchema });
+export const UsersResponseSchema = z.array(z.object({ userId: z.string(), email: z.string().email(), loginMethod: z.string(), role: RoleSchema, enabled: z.boolean(), lastLoginAt: z.string().datetime().nullable() }));
+export const ChatTokenResponseSchema = z.object({ token: z.string(), capabilities: z.array(z.string()) });
+export const StatusResponseSchema = z.object({ stages: z.array(z.object({ name: z.string(), exists: z.boolean(), status: z.string().optional() })), chatRoom: z.object({ exists: z.boolean(), status: z.string().optional() }) });
+export const EmptyResponseSchema = z.object({ success: z.boolean() });
+export const HeartbeatResponseSchema = z.object({ expiresAt: z.string().datetime() });
+export const DeviceHeartbeatRequestSchema = z.object({});
+export const BroadcastStopResponseSchema = BroadcastSchema;
+export const ChatTokenRequestSchema = z.object({});
+export const ChatCustomEventSchema = z.object({ eventName: z.enum(CHAT_EVENTS), attributes: z.record(z.string()).optional() });
+export const SlideCompleteResponseSchema = SlideSchema;
+export const SlideCreateResponseSchema = SlideSchema;
+export const ArchiveUpdateResponseSchema = ArchiveSchema;
+export const UserInviteResponseSchema = z.object({ invited: z.array(z.string().email()) });
+export const UserUpdateResponseSchema = z.object({ userId: z.string(), role: RoleSchema, enabled: z.boolean() });
+export const CsvExportResponseSchema = z.string();
+
+export const BroadcastIdParamsSchema = z.object({ id: z.string().min(1) });
+export const DeviceIdParamsSchema = z.object({ deviceId: z.string().min(1) });
+export const MessageIdParamsSchema = z.object({ messageId: z.string().min(1) });
+export const UserIdParamsSchema = z.object({ userId: z.string().min(1) });
+export const SlideIdParamsSchema = z.object({ id: z.string().min(1) });
+export const ArchiveIdParamsSchema = z.object({ id: z.string().min(1) });
+export const NgWordParamsSchema = z.object({ word: NgWordSchema });
+export const ArchiveListQuerySchema = z.object({ role: RoleSchema.optional() });
+export const ArchiveUpdateRequestSchema = z.object({ title: TitleSchema.optional(), published: z.boolean().optional() }).refine((value) => Object.keys(value).length > 0);
+
+export type MeResponse = z.infer<typeof MeResponseSchema>;
+export type BroadcastResponse = z.infer<typeof BroadcastResponseSchema>;
+export type StageTokenRequest = z.infer<typeof StageTokenRequestSchema>;
+export type StageTokenResponse = z.infer<typeof StageTokenResponseSchema>;
+export type DisplayNameRequest = z.infer<typeof DisplayNameRequestSchema>;
+export type BroadcastStartRequest = z.infer<typeof BroadcastStartRequestSchema>;
+export type Comment = z.infer<typeof CommentSchemaResponse>;
+export type SlideUpload = z.infer<typeof SlideUploadSchema>;
+export type Slide = z.infer<typeof SlideSchema>;
+export type Archive = z.infer<typeof ArchiveSchema>;
+export type InviteUsersRequest = z.infer<typeof InviteUsersRequestSchema>;
+export type UpdateRoleRequest = z.infer<typeof UpdateRoleRequestSchema>;
+
