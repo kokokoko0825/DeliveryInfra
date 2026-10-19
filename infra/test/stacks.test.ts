@@ -27,7 +27,9 @@ function fixtures() {
   mkdirSync(path.join(web, 'assets'), { recursive: true });
   writeFileSync(path.join(web, 'index.html'), '<!doctype html>');
   writeFileSync(path.join(web, 'assets', 'app.js'), '');
-  return { api, web, empty: path.join(root, 'missing') };
+  const keys = path.join(root, 'keys');
+  mkdirSync(keys);
+  return { api, web, keys, empty: path.join(root, 'missing') };
 }
 
 function synth(context: Record<string, string>, options: { built?: boolean; key?: boolean } = {}) {
@@ -38,6 +40,7 @@ function synth(context: Record<string, string>, options: { built?: boolean; key?
     env: {},
     apiDistDir: built ? dirs.api : dirs.empty,
     webDistDir: built ? dirs.web : dirs.empty,
+    publicKeyDir: dirs.keys,
     ...(options.key === false ? {} : { publicKeyPem: FAIL_CLOSED_PUBLIC_KEY }),
   });
   return {

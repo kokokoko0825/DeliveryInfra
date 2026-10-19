@@ -5,7 +5,7 @@
   "tsconfigFile": "tsconfig.json",
   "coverageAnalysis": "perTest",
   "mutate": ["src/auth.ts", "src/router.ts", "src/env.ts", "src/errors.ts", "src/database.ts", "src/chat-review.ts", "src/recording.ts", "src/cognito.ts", "src/archive-expiry.ts", "src/storage.ts", "!src/**/*.test.ts"],
-  "reporters": ["clear-text", "html", "progress"],
+  "reporters": ["clear-text", "html", "json", "progress"],
   "thresholds": { "high": 80, "low": 80, "break": 80 },
   "concurrency": 8
 }

@@ -5,7 +5,7 @@
   "checkers": ["typescript"],
   "tsconfigFile": "tsconfig.json",
   "coverageAnalysis": "perTest",
-  "mutate": ["src/config.ts", "src/edge.ts", "src/waf.ts", "src/app-config.ts", "src/keys.ts"],
+  "mutate": ["src/config.ts", "src/edge.ts", "src/waf.ts", "src/app.ts", "src/app-config.ts", "src/keys.ts"],
   "reporters": ["clear-text", "html", "progress"],
   "htmlReporter": { "fileName": "reports/mutation/index.html" },
   "thresholds": { "high": 90, "low": 80, "break": 80 }

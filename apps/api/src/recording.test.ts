@@ -89,7 +89,34 @@ describe('recording handler', () => {
 
   it('ignores other composition events', async () => {
     await expect(handler({ ...event, detail: { event_name: 'Session Start' } })).resolves.toEqual({ archived: false });
+    await expect(handler({ ...event, source: 'custom.source' })).resolves.toEqual({ archived: false });
+    await expect(handler({ ...event, 'detail-type': 'Other Event' })).resolves.toEqual({ archived: false });
     expect(ddb.commandCalls(PutCommand)).toHaveLength(0);
     expect(ddb.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  it('does not create an archive when composition metadata is absent', async () => {
+    ddb.on(GetCommand, { TableName: 'table', Key: { PK: 'COMPOSITION#arn:composition', SK: 'META' } }).resolves({});
+    await expect(handler(event)).resolves.toEqual({ archived: false, broadcastEnded: false });
+    expect(ivs.commandCalls(GetCompositionCommand)).toHaveLength(0);
+    expect(ddb.commandCalls(PutCommand)).toHaveLength(0);
+    expect(chat.commandCalls(SendEventCommand)).toHaveLength(0);
+  });
+
+  it('rejects a composition that has no S3 recording prefix', async () => {
+    ddb.on(GetCommand, { TableName: 'table', Key: { PK: 'COMPOSITION#arn:composition', SK: 'META' } }).resolves({ Item: { title: '配信' } });
+    ivs.on(GetCompositionCommand).resolves({ composition: { arn: 'arn:composition', stageArn: 'stage', state: 'STOPPED', layout: {}, destinations: [{ id: 'd', state: 'STOPPED', configuration: {}, detail: { s3: {} as never } } as never] } });
+    await expect(handler(event)).rejects.toThrow('IVS composition arn:composition has no S3 recording prefix');
+    expect(ddb.commandCalls(PutCommand)).toHaveLength(0);
+    expect(chat.commandCalls(SendEventCommand)).toHaveLength(0);
+  });
+
+  it('clamps negative derived duration to zero and propagates non-conditional archive write failures', async () => {
+    ddb.on(GetCommand, { TableName: 'table', Key: { PK: 'COMPOSITION#arn:composition', SK: 'META' } }).resolves({ Item: { title: '配信', startedAt: '2026-01-01T01:00:00.000Z', outputPrefix: 'prefix' } });
+    const earlierEvent = { ...event, time: '2026-01-01T00:59:59.000Z' };
+    ddb.on(PutCommand).rejects(new Error('ddb unavailable'));
+    await expect(handler(earlierEvent)).rejects.toThrow('ddb unavailable');
+    expect(ddb.commandCalls(PutCommand)[0]?.args[0].input.Item).toMatchObject({ durationSeconds: 0, recordingPrefix: 'prefix' });
+    expect(chat.commandCalls(SendEventCommand)).toHaveLength(0);
   });
 });

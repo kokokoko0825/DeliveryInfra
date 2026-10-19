@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockClient } from 'aws-sdk-client-mock';
 import { DeleteObjectsCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { createArchiveExpiryHandler, type ArchiveStreamRecord } from './archive-expiry';
@@ -29,8 +29,15 @@ describe('archive expiry stream handler (R1-22)', () => {
   it('pages through every object under the prefix', async () => {
     s3.on(ListObjectsV2Command).resolvesOnce({ Contents: [{ Key: 'stage/a-1/d/composite/1' }], NextContinuationToken: 'next' }).resolves({ Contents: [{ Key: 'stage/a-1/d/composite/2' }] });
     await handler({ Records: [remove('1', archiveImage('a-1'))] });
-    expect(s3.commandCalls(ListObjectsV2Command)[1]?.args[0].input.ContinuationToken).toBe('next');
+    expect(s3.commandCalls(ListObjectsV2Command).map((call) => call.args[0].input)).toEqual([
+      { Bucket: 'recording', Prefix: 'stage/a-1/d/composite/', ContinuationToken: undefined },
+      { Bucket: 'recording', Prefix: 'stage/a-1/d/composite/', ContinuationToken: 'next' },
+    ]);
     expect(s3.commandCalls(DeleteObjectsCommand)).toHaveLength(2);
+    expect(s3.commandCalls(DeleteObjectsCommand).map((call) => call.args[0].input.Delete?.Objects)).toEqual([
+      [{ Key: 'stage/a-1/d/composite/1' }],
+      [{ Key: 'stage/a-1/d/composite/2' }],
+    ]);
   });
 
   it('removes trailing separators before passing the stored recording prefix to storage', async () => {
@@ -60,8 +67,32 @@ describe('archive expiry stream handler (R1-22)', () => {
   });
 
   it('fails the stream invocation when a malformed record has no sequence number to report', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     await expect(handler({ Records: [
       { eventName: 'REMOVE', dynamodb: { OldImage: { PK: { S: 'ARCHIVE' }, SK: { S: 'a-1' } } } },
     ] })).rejects.toThrow('Archive a-1 has no recordingPrefix');
+    expect(error).toHaveBeenCalledWith(JSON.stringify({ level: 'error', event: 'archive_recording_delete_failed', archiveId: 'a-1', message: 'Archive a-1 has no recordingPrefix' }));
+    error.mockRestore();
+  });
+
+  it('fails the invocation when S3 deletion fails and a sequence number is unavailable', async () => {
+    s3.on(ListObjectsV2Command).rejects(new Error('S3 unavailable'));
+    await expect(handler({ Records: [
+      { eventName: 'REMOVE', userIdentity: ttlIdentity, dynamodb: { OldImage: archiveImage('a-4') } },
+    ] })).rejects.toThrow('S3 unavailable');
+    expect(s3.commandCalls(DeleteObjectsCommand)).toHaveLength(0);
+  });
+
+  it('records whether a removal came from DynamoDB TTL', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    await handler({ Records: [
+      remove('ttl', archiveImage('ttl')),
+      { eventName: 'REMOVE', dynamodb: { SequenceNumber: 'manual', OldImage: archiveImage('manual') } },
+    ] });
+    expect(info.mock.calls.map(([line]) => JSON.parse(String(line)))).toEqual([
+      { event: 'archive_recording_deleted', archiveId: 'ttl', prefix: 'stage/ttl/d/composite', deleted: 2, byTtl: true },
+      { event: 'archive_recording_deleted', archiveId: 'manual', prefix: 'stage/manual/d/composite', deleted: 2, byTtl: false },
+    ]);
+    info.mockRestore();
   });
 });

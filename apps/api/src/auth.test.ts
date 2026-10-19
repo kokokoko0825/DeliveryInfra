@@ -41,6 +41,13 @@ describe('authenticate', () => {
       await expect(authenticate('token', env, db)).rejects.toMatchObject({ statusCode: 403, code: 'INVALID_ROLE' });
     }
   });
+  it('rejects non-array and non-string group claims instead of inferring viewer', async () => {
+    for (const groups of [null, 'viewer', [null], [1], {}]) {
+      verify.mockResolvedValue(accessToken({ 'cognito:groups': groups }));
+      await expect(authenticate('token', env, db)).rejects.toMatchObject({ statusCode: 403, code: 'INVALID_ROLE' });
+    }
+    expect(ddb.commandCalls(GetCommand)).toHaveLength(0);
+  });
   it('returns the role, subject and username from real access token claims (R1-01/R1-12)', async () => {
     verify.mockResolvedValue(accessToken());
     await expect(authenticate('token', env, db)).resolves.toEqual({ userId: 'sub-1', username: 'okta_user-1', role: 'camera' });
@@ -67,5 +74,12 @@ describe('authenticate', () => {
     await authenticate('token', env, db);
     await authenticate('token', env, db);
     expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not hide database errors while checking token revocation state', async () => {
+    verify.mockResolvedValue(accessToken());
+    ddb.on(GetCommand).rejects(new Error('DynamoDB unavailable'));
+    await expect(authenticate('token', env, db)).rejects.toThrow('DynamoDB unavailable');
+    expect(ddb.commandCalls(GetCommand)[0]?.args[0].input).toMatchObject({ Key: { PK: 'USER#sub-1', SK: 'AUTH' }, ConsistentRead: true });
   });
 });

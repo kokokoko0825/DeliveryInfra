@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   ApiEnvSchema, ArchiveExpiryEnvSchema, ChatReviewEnvSchema, CognitoEnvSchema,
-  RecordingEnvSchema, getApiEnv, getArchiveExpiryEnv, getChatReviewEnv, getCognitoEnv, getRecordingEnv,
+  RecordingEnvSchema, getApiEnv, getArchiveExpiryEnv, getChatReviewEnv, getCognitoEnv, getRecordingEnv, resetEnvCache,
 } from './env';
 
 const apiEnv = {
@@ -37,5 +37,44 @@ describe('Lambda environment validation', () => {
     expect(getRecordingEnv({ TABLE_NAME: 't', RECORDING_BUCKET: 'b', CHAT_ROOM_ARN: 'r', STAGE_BROADCAST_ARN: 's' }).STAGE_BROADCAST_ARN).toBe('s');
     expect(getCognitoEnv({ TABLE_NAME: 'cognito-table' }).TABLE_NAME).toBe('cognito-table');
     expect(getArchiveExpiryEnv({ RECORDING_BUCKET: 'archive-bucket' }).RECORDING_BUCKET).toBe('archive-bucket');
+  });
+
+  it('caches process environment after successful parsing and resetEnvCache reloads it', () => {
+    const values = { ...apiEnv, AWS_REGION: 'us-east-1', NODE_ENV: 'test' };
+    const keys = [...Object.keys(values), 'AWS_REGION', 'NODE_ENV'];
+    const original = new Map(keys.map((key) => [key, process.env[key]]));
+    try {
+      resetEnvCache();
+      for (const key of keys) delete process.env[key];
+      Object.assign(process.env, values);
+      expect(getApiEnv().TABLE_NAME).toBe('table');
+      process.env.TABLE_NAME = 'changed';
+      expect(getApiEnv().TABLE_NAME).toBe('table');
+      resetEnvCache();
+      expect(getApiEnv().TABLE_NAME).toBe('changed');
+    } finally {
+      resetEnvCache();
+      for (const key of keys) {
+        const value = original.get(key);
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
+  it('does not cache an invalid process environment', () => {
+    const original = process.env.TABLE_NAME;
+    try {
+      resetEnvCache();
+      Object.assign(process.env, apiEnv);
+      process.env.TABLE_NAME = '';
+      expect(() => getApiEnv()).toThrow();
+      process.env.TABLE_NAME = 'fixed';
+      expect(getApiEnv().TABLE_NAME).toBe('fixed');
+    } finally {
+      resetEnvCache();
+      if (original === undefined) delete process.env.TABLE_NAME;
+      else process.env.TABLE_NAME = original;
+    }
   });
 });

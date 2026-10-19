@@ -80,7 +80,10 @@ beforeEach(() => {
   ivs.on(CreateParticipantTokenCommand).resolves({ participantToken: { participantId: 'participant', token: 'signed-token', expirationTime: new Date('2026-01-01T00:00:00.000Z'), capabilities: ['PUBLISH'] } });
 });
 // R1-10: どの経路もテーブル全体の Scan をしない
-afterEach(() => expect(ddb.commandCalls(ScanCommand)).toHaveLength(0));
+afterEach(() => {
+  vi.useRealTimers();
+  expect(ddb.commandCalls(ScanCommand)).toHaveLength(0);
+});
 
 describe('API router', () => {
   it('rejects unauthenticated calls before routing', async () => {
@@ -90,6 +93,29 @@ describe('API router', () => {
   it('returns 404 for unknown routes and requires administrator roles', async () => {
     await expect(request('viewer', 'GET', '/users')).resolves.toMatchObject({ statusCode: 403, body: expect.stringContaining('FORBIDDEN') });
     await expect(request('admin', 'GET', '/missing')).resolves.toMatchObject({ statusCode: 404 });
+  });
+  it('normalizes auth header names, falls back to the HTTP path, and rejects paths outside the API', async () => {
+    const auth = vi.fn().mockRejectedValue(new HttpError(401, 'UNAUTHORIZED', 'login'));
+    const handler = createApiHandler({ env, clients, authenticate: auth });
+    const fallback = makeEvent('GET', '/me');
+    fallback.rawPath = '';
+    fallback.requestContext.http.path = '/api/me';
+    fallback.headers = { 'x-auth-token': 'lowercase-token' };
+    expect((await handler(fallback)).statusCode).toBe(401);
+    expect(auth).toHaveBeenCalledWith('lowercase-token', env, expect.anything());
+    const outside = await handler({ ...makeEvent('GET', '/me'), rawPath: '/elsewhere', headers: {} });
+    expect(outside.statusCode).toBe(404);
+    expect(auth).toHaveBeenCalledTimes(1);
+  });
+  it('returns validation errors for malformed JSON and accepts base64 encoded JSON', async () => {
+    const malformed = { ...makeEvent('POST', '/ng-words'), body: '{' };
+    const invalid = await createApiHandler({ env, clients, authenticate: vi.fn().mockResolvedValue({ userId: 'user-1', username: 'name', role: 'admin' }), now: () => NOW_MS })(malformed);
+    expect(invalid.statusCode).toBe(400);
+    expect(data(invalid).error?.code).toBe('VALIDATION_ERROR');
+    const encoded = Buffer.from(JSON.stringify({ word: 'blocked' })).toString('base64');
+    const event = { ...makeEvent('POST', '/ng-words'), body: encoded, isBase64Encoded: true };
+    expect((await createApiHandler({ env, clients, authenticate: vi.fn().mockResolvedValue({ userId: 'user-1', username: 'name', role: 'admin' }), now: () => NOW_MS })(event)).statusCode).toBe(200);
+    expect(ddb.commandCalls(PutCommand).at(-1)?.args[0].input.Item).toMatchObject({ PK: 'NGWORD', SK: 'blocked', word: 'blocked' });
   });
   it.each([
     { name: '0 chars', displayName: '', statusCode: 400 },
@@ -717,6 +743,23 @@ describe('archives and signed cookies', () => {
     expect((await request('admin', 'POST', '/archives/old/cookies')).statusCode).toBe(404);
     expect(getSignedCookies).toHaveBeenCalledTimes(2);
   });
+
+  it('reuses the SecureString key before its 55-minute expiry and refreshes exactly at expiry', async () => {
+    ddb.on(GetCommand, { Key: { PK: 'ARCHIVE', SK: 'pub' } }).resolves({ Item: archive('pub', { retainUntil: '2040-01-01T00:00:00.000Z' }) });
+    const base = Date.parse('2030-01-01T00:00:00.000Z');
+    const at = (now: number) => createApiHandler({
+      env,
+      clients,
+      authenticate: vi.fn().mockResolvedValue({ userId: 'user-1', username: 'name', role: 'viewer' }),
+      now: () => now,
+    })(makeEvent('POST', '/archives/pub/cookies'));
+    expect((await at(base)).statusCode).toBe(204);
+    expect(ssm.commandCalls(GetParameterCommand)).toHaveLength(1);
+    expect((await at(base + 10_000)).statusCode).toBe(204);
+    expect(ssm.commandCalls(GetParameterCommand)).toHaveLength(1);
+    expect((await at(base + 55 * 60 * 1000)).statusCode).toBe(204);
+    expect(ssm.commandCalls(GetParameterCommand)).toHaveLength(2);
+  });
 });
 
 describe('user management', () => {
@@ -854,7 +897,31 @@ describe('user management', () => {
   it('chunks BatchGet requests at 100 keys and retries unprocessed keys', async () => {
     cognito.on(ListUsersCommand).resolves({ Users: Array.from({ length: 51 }, (_, index) => ({ Username: `u${index}`, Attributes: [{ Name: 'sub', Value: `s${index}` }, { Name: 'email', Value: `u${index}@example.test` }] })) });
     ddb.on(BatchGetCommand).resolvesOnce({ Responses: { table: [] }, UnprocessedKeys: { table: { Keys: [{ PK: 'USER#s0', SK: 'PROFILE' }] } } }).resolves({ Responses: { table: [] } });
-    expect((await request('admin', 'GET', '/users')).statusCode).toBe(200);
+    vi.useFakeTimers();
+    const timers = vi.spyOn(globalThis, 'setTimeout');
+    const pending = request('admin', 'GET', '/users');
+    await vi.runAllTimersAsync();
+    expect((await pending).statusCode).toBe(200);
     expect(ddb.commandCalls(BatchGetCommand).map((call) => call.args[0].input.RequestItems?.table?.Keys?.length)).toEqual([100, 1, 2]);
+    expect(timers.mock.calls.map(([, delay]) => delay)).toEqual([100]);
+    expect(vi.getTimerCount()).toBe(0);
+    timers.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it('fails after five BatchGet attempts and reports an internal error', async () => {
+    cognito.on(ListUsersCommand).resolves({ Users: [{ Username: 'u0', Attributes: [{ Name: 'sub', Value: 's0' }] }] });
+    ddb.on(BatchGetCommand).callsFake(async (input) => ({ UnprocessedKeys: input.RequestItems }));
+    vi.useFakeTimers();
+    const timers = vi.spyOn(globalThis, 'setTimeout');
+    const pending = request('admin', 'GET', '/users');
+    await vi.runAllTimersAsync();
+    const response = await pending;
+    expect(response.statusCode).toBe(500);
+    expect(data(response).error).toEqual({ code: 'INTERNAL_ERROR', message: '処理に失敗しました' });
+    expect(ddb.commandCalls(BatchGetCommand)).toHaveLength(5);
+    expect(timers.mock.calls.map(([, delay]) => delay)).toEqual([100, 200, 400, 800]);
+    timers.mockRestore();
+    vi.useRealTimers();
   });
 });

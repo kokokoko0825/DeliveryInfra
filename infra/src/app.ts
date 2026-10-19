@@ -15,12 +15,16 @@ export interface BuildOptions {
   apiDistDir?: string;
   webDistDir?: string;
   publicKeyPem?: string;
+  /** 公開鍵ディレクトリ。テストでは実リポジトリのデプロイ鍵から分離できる。 */
+  publicKeyDir?: string;
 }
 
 /** 3スタック構成: WAF(us-east-1) → 本体(ap-northeast-1) → 料金プラン(us-east-1)。 */
 export function buildApp(app: App, options: BuildOptions = {}) {
   const config = loadConfig(createLookup((key) => app.node.tryGetContext(key), options.env ?? process.env));
-  const keyFile = path.join(INFRA_ROOT, publicKeyPath(config.envName));
+  const keyFile = options.publicKeyDir
+    ? path.join(options.publicKeyDir, path.basename(publicKeyPath(config.envName)))
+    : path.join(INFRA_ROOT, publicKeyPath(config.envName));
   const pem = options.publicKeyPem ?? (existsSync(keyFile) ? readFileSync(keyFile, 'utf8') : undefined);
   const stackName = (name: string) => `${config.prefix}-${name}`;
 

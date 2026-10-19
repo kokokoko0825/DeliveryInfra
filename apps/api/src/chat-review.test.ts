@@ -36,18 +36,27 @@ describe('chat review policy', () => {
     expect(ddb.commandCalls(ScanCommand)).toHaveLength(0);
   });
   it('denies empty and over-limit comments', async () => {
-    await expect(chatReviewHandler(event(''))).resolves.toMatchObject({ ReviewResult: 'DENY' });
-    await expect(chatReviewHandler(event('x'.repeat(201)))).resolves.toMatchObject({ ReviewResult: 'DENY' });
+    const empty = await chatReviewHandler(event(''));
+    expect(empty).toMatchObject({ Content: ' ', ReviewResult: 'DENY' });
+    expect(empty.Attributes?.Reason?.length).toBeGreaterThan(0);
+    expect(empty.Attributes?.Reason?.length).toBeLessThanOrEqual(200);
+    const tooLong = await chatReviewHandler(event('x'.repeat(201)));
+    expect(tooLong).toMatchObject({ Content: 'x'.repeat(201), ReviewResult: 'DENY' });
+    expect(tooLong.Attributes?.Reason?.length).toBeGreaterThan(0);
+    expect(tooLong.Attributes?.Reason?.length).toBeLessThanOrEqual(200);
+    expect(ddb.commandCalls(GetCommand)).toHaveLength(0);
+    expect(ddb.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ddb.commandCalls(TransactWriteCommand)).toHaveLength(0);
   });
   it('denies NFKC-normalized forbidden words and suspended users', async () => {
     ddb.on(QueryCommand).resolves({ Items: [{ PK: 'NGWORD', SK: 'blocked', word: 'blocked' }] });
-    await expect(chatReviewHandler(event('ＢＬＯＣＫＥＤ'))).resolves.toMatchObject({ ReviewResult: 'DENY' });
+    await expect(chatReviewHandler(event('ＢＬＯＣＫＥＤ'))).resolves.toEqual({ Content: 'ＢＬＯＣＫＥＤ', ReviewResult: 'DENY', Attributes: { Reason: '使用できない単語が含まれています' } });
     ddb.on(GetCommand).resolves({ Item: { displayName: 'テストユーザー', commentSuspended: true } });
-    await expect(chatReviewHandler(event('hello'))).resolves.toMatchObject({ ReviewResult: 'DENY' });
+    await expect(chatReviewHandler(event('hello'))).resolves.toEqual({ Content: 'hello', ReviewResult: 'DENY', Attributes: { Reason: 'コメントの送信が停止されています' } });
   });
   it('denies a second message within three seconds atomically', async () => {
     ddb.on(PutCommand).rejectsOnce(Object.assign(new Error('conditional'), { name: 'ConditionalCheckFailedException' }));
-    await expect(chatReviewHandler(event('hello'))).resolves.toMatchObject({ ReviewResult: 'DENY' });
+    await expect(chatReviewHandler(event('hello'))).resolves.toEqual({ Content: 'hello', ReviewResult: 'DENY', Attributes: { Reason: 'コメントは3秒に1回まで送信できます' } });
   });
   it('overwrites client supplied attributes with the stored display name (R1-04)', async () => {
     const response = await chatReviewHandler({ ...event('hello'), Attributes: { displayName: '運営事務局', extra: 'x' } });
@@ -56,5 +65,38 @@ describe('chat review policy', () => {
   it('returns the trimmed content it stored', async () => {
     await expect(chatReviewHandler(event('  hi  '))).resolves.toMatchObject({ ReviewResult: 'ALLOW', Content: 'hi' });
     expect(ddb.commandCalls(TransactWriteCommand).at(-1)?.args[0].input.TransactItems?.[0]?.Put?.Item?.comment).toBe('hi');
+  });
+
+  it('denies profiles without a display name and does not query words or rate limits', async () => {
+    ddb.on(GetCommand).resolves({ Item: { commentSuspended: false } });
+    await expect(chatReviewHandler(event('hello'))).resolves.toEqual({ Content: 'hello', ReviewResult: 'DENY', Attributes: { Reason: '表示名を設定してください' } });
+    expect(ddb.commandCalls(QueryCommand)).toHaveLength(0);
+    expect(ddb.commandCalls(PutCommand)).toHaveLength(0);
+  });
+
+  it('uses the exact three-second cutoff and propagates non-conditional rate errors', async () => {
+    await chatReviewHandler(event('hello'));
+    expect(ddb.commandCalls(PutCommand)[0]?.args[0].input).toMatchObject({
+      Item: { PK: 'USER#user-1', SK: 'CHAT_RATE', lastSentAt: 1_700_000_000_000, ttl: 1_700_000_060 },
+      ConditionExpression: 'attribute_not_exists(PK) OR #lastSentAt <= :cutoff',
+      ExpressionAttributeValues: { ':cutoff': 1_699_999_997_000 },
+    });
+    const failingClients = createClients(env);
+    const failingDdb = mockClient(failingClients.ddb);
+    failingDdb.on(GetCommand).resolves({ Item: { displayName: 'テストユーザー' } });
+    failingDdb.on(QueryCommand).resolves({ Items: [] });
+    failingDdb.on(PutCommand).rejects(Object.assign(new Error('ddb unavailable'), { name: 'ProvisionedThroughputExceededException' }));
+    const failingHandler = createChatReviewHandler({ env, clients: failingClients, now: () => 1_700_000_000_000 });
+    await expect(failingHandler(event('second'))).rejects.toThrow('ddb unavailable');
+    expect(failingDdb.commandCalls(TransactWriteCommand)).toHaveLength(0);
+  });
+
+  it('propagates NG-word query and comment transaction failures', async () => {
+    ddb.on(QueryCommand).rejectsOnce(new Error('query unavailable'));
+    await expect(chatReviewHandler(event('hello'))).rejects.toThrow('query unavailable');
+    expect(ddb.commandCalls(PutCommand)).toHaveLength(0);
+    ddb.on(QueryCommand).resolves({ Items: [] });
+    ddb.on(TransactWriteCommand).rejectsOnce(new Error('transaction unavailable'));
+    await expect(chatReviewHandler(event('hello'))).rejects.toThrow('transaction unavailable');
   });
 });
