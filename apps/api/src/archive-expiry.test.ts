@@ -33,6 +33,11 @@ describe('archive expiry stream handler (R1-22)', () => {
     expect(s3.commandCalls(DeleteObjectsCommand)).toHaveLength(2);
   });
 
+  it('removes trailing separators before passing the stored recording prefix to storage', async () => {
+    await handler({ Records: [remove('6', { ...archiveImage('a-1'), recordingPrefix: { S: 'stage/a-1/d/composite///' } })] });
+    expect(s3.commandCalls(ListObjectsV2Command)[0]?.args[0].input.Prefix).toBe('stage/a-1/d/composite/');
+  });
+
   it('ignores inserts, modifications and non-archive removals', async () => {
     await handler({ Records: [
       { eventName: 'MODIFY', dynamodb: { SequenceNumber: '1', OldImage: archiveImage('a-1') } },
@@ -52,5 +57,11 @@ describe('archive expiry stream handler (R1-22)', () => {
   it('treats an archive without a recordingPrefix as a failure instead of deleting the whole bucket', async () => {
     await expect(handler({ Records: [remove('5', { PK: { S: 'ARCHIVE' }, SK: { S: 'a-3' } })] })).resolves.toEqual({ batchItemFailures: [{ itemIdentifier: '5' }] });
     expect(s3.commandCalls(ListObjectsV2Command)).toHaveLength(0);
+  });
+
+  it('fails the stream invocation when a malformed record has no sequence number to report', async () => {
+    await expect(handler({ Records: [
+      { eventName: 'REMOVE', dynamodb: { OldImage: { PK: { S: 'ARCHIVE' }, SK: { S: 'a-1' } } } },
+    ] })).rejects.toThrow('Archive a-1 has no recordingPrefix');
   });
 });

@@ -1,10 +1,8 @@
 {
   "$schema": "../../node_modules/@stryker-mutator/core/schema/stryker-schema.json",
-  "plugins": ["@stryker-mutator/typescript-checker", "@stryker-mutator/vitest-runner"],
+  "plugins": ["@stryker-mutator/vitest-runner"],
   "testRunner": "vitest",
-  "vitest": { "configFile": "vite.config.ts" },
-  "checkers": ["typescript"],
-  "tsconfigFile": "tsconfig.json",
+  "vitest": { "configFile": "vite.config.ts", "related": true },
   "coverageAnalysis": "perTest",
   "mutate": [
     "src/features/switcher/engine/*.ts",
@@ -17,7 +15,7 @@
     "src/lib/ivs/mediaApi.ts",
     "!src/**/*.test.ts"
   ],
-  "tempDirName": ".stryker-tmp/media",
+  "tempDirName": ".stryker-tmp-media",
   "reporters": ["clear-text", "html", "json", "progress"],
   "htmlReporter": { "fileName": "reports/mutation/media.html" },
   "jsonReporter": { "fileName": "reports/mutation/media.json" },
