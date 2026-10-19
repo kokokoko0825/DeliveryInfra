@@ -1,1 +1,3 @@
-// API implementation is owned by Wave 1.
+import { apiLambdaHandler } from './router';
+
+export const handler = apiLambdaHandler;

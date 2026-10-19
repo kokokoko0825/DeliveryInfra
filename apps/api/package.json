@@ -1,11 +1,36 @@
 {
-  "name": "api", "version": "0.1.0", "private": true, "type": "module",
-  "scripts": { "typecheck": "tsc --noEmit", "lint": "eslint src", "test": "vitest run --passWithNoTests", "mutation": "echo 'API implementation is owned by Wave 1'" },
-  "dependencies": {
-    "@aws-sdk/client-ivs-realtime": "^3.922.0", "@aws-sdk/client-ivschat": "^3.922.0", "@aws-sdk/client-dynamodb": "^3.922.0",
-    "@aws-sdk/client-s3": "^3.922.0", "@aws-sdk/client-cognito-identity-provider": "^3.922.0", "@aws-sdk/client-ssm": "^3.922.0",
-    "@aws-sdk/lib-dynamodb": "^3.922.0", "@aws-sdk/s3-presigned-post": "^3.922.0", "@aws-sdk/cloudfront-signer": "^3.922.0", "aws-jwt-verify": "^5.1.1",
-    "@delivery/shared": "workspace:*", "zod": "^3.25.76"
+  "name": "api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src",
+    "test": "vitest run --passWithNoTests",
+    "build": "node scripts/build.mjs",
+    "mutation": "stryker run"
   },
-  "devDependencies": { "aws-sdk-client-mock": "^4.1.0", "typescript": "^5.9.3", "vitest": "^3.2.4" }
+  "dependencies": {
+    "@aws-sdk/client-cognito-identity-provider": "^3.922.0",
+    "@aws-sdk/client-dynamodb": "^3.922.0",
+    "@aws-sdk/client-ivs-realtime": "^3.922.0",
+    "@aws-sdk/client-ivschat": "^3.922.0",
+    "@aws-sdk/client-s3": "^3.922.0",
+    "@aws-sdk/client-ssm": "^3.922.0",
+    "@aws-sdk/cloudfront-signer": "^3.922.0",
+    "@aws-sdk/lib-dynamodb": "^3.922.0",
+    "@aws-sdk/s3-presigned-post": "^3.922.0",
+    "@delivery/shared": "workspace:*",
+    "aws-jwt-verify": "^5.1.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@stryker-mutator/core": "^9.6.1",
+    "@stryker-mutator/typescript-checker": "^9.6.1",
+    "@stryker-mutator/vitest-runner": "^9.6.1",
+    "aws-sdk-client-mock": "^4.1.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
 }

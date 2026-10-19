@@ -1,0 +1,11 @@
+{
+  "plugins": ["@stryker-mutator/typescript-checker", "@stryker-mutator/vitest-runner"],
+  "testRunner": "vitest",
+  "checkers": ["typescript"],
+  "tsconfigFile": "tsconfig.json",
+  "coverageAnalysis": "perTest",
+  "mutate": ["src/auth.ts", "src/router.ts", "src/chat-review.ts", "src/recording.ts", "src/cognito.ts", "!src/**/*.test.ts"],
+  "reporters": ["clear-text", "html", "progress"],
+  "thresholds": { "high": 80, "low": 80, "break": 80 },
+  "concurrency": 4
+}
