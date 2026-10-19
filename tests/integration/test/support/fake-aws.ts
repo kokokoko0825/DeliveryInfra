@@ -294,8 +294,14 @@ export class FakeChat {
     if (identifier !== ENV.CHAT_ROOM_ARN) throw awsError('ResourceNotFoundException', `room ${String(identifier)}`);
   }
 
+  private failures = 0;
+
+  /** 次の n 回の SendEvent を一時障害で失敗させる（再試行の検証用）。 */
+  failNextSends(count = 1) { this.failures = count; }
+
   sendEvent(input: SendEventCommand['input']) {
     this.room(input.roomIdentifier);
+    if (this.failures > 0) { this.failures -= 1; throw awsError('ThrottlingException', 'chat unavailable'); }
     this.events.push({ eventName: input.eventName!, ...(input.attributes ? { attributes: input.attributes } : {}) });
     return { id: randomUUID() };
   }

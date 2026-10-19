@@ -299,9 +299,18 @@ describe('配信 start → stats → stop → 録画イベント → アーカ�
     // アクセストークンの有効期限(1時間)を過ぎたので、管理者・視聴者ともトークンを更新して続ける。
     const adminAgain = await login('admin@example.com');
     const viewerAgain = await login('viewer@example.com');
-    const stopped = BroadcastSchema.parse((await api('POST', '/broadcast/stop', { token: adminAgain, body: {} })).json);
-    expect(stopped).toMatchObject({ id: broadcast.id, status: 'ended', endedAt: new Date(Date.now()).toISOString() });
-    expect(errorCode(await api('POST', '/broadcast/stop', { token: adminAgain, body: {} }))).toBe('BROADCAST_NOT_LIVE');
+    const endedEvents = () => world.chat.events.filter((event) => event.eventName === 'broadcast-ended').length;
+    // 1回目の停止は ended に更新した後の SendEvent が一時障害で失敗する。
+    world.chat.failNextSends();
+    expect((await api('POST', '/broadcast/stop', { token: adminAgain, body: {} })).statusCode).toBe(500);
+    expect(endedEvents()).toBe(0);
+    const endedAt = new Date(Date.now()).toISOString();
+    // 再試行は ended 済みでも 200 で、endedAt は変えずに broadcast-ended を再送する(R2-03)。
+    const retried = await api('POST', '/broadcast/stop', { token: adminAgain, body: {} });
+    expect(retried.statusCode).toBe(200);
+    const stopped = BroadcastSchema.parse(retried.json);
+    expect(stopped).toMatchObject({ id: broadcast.id, status: 'ended', endedAt });
+    expect(endedEvents()).toBe(1);
     const [composition] = [...world.ivs.compositions.values()];
     expect(composition!.state).toBe('STOPPED');
 
@@ -310,9 +319,21 @@ describe('配信 start → stats → stop → 録画イベント → アーカ�
       world.s3.put(ENV.RECORDING_BUCKET, `${composition!.recordingPrefix}/${file}`, 'data');
     }
     expect(await recordingHandler(recordingEvent(composition!.arn, 'Session Start'))).toEqual({ archived: false });
+    // 同じ Composition で ended 済みなら recording イベントのたびに broadcast-ended を再送する(R2-03)。
+    // 1回目は SendEvent の一時障害で Lambda が失敗し、EventBridge の再試行(2回目)で通知が届く。
+    world.chat.failNextSends();
+    await expect(recordingHandler(recordingEvent(composition!.arn))).rejects.toMatchObject({ name: 'ThrottlingException' });
+    expect(endedEvents()).toBe(1);
     const archived = await recordingHandler(recordingEvent(composition!.arn));
-    expect(archived.archived).toBe(true);
+    expect(archived).toMatchObject({ archived: true, broadcastEnded: true });
+    expect(endedEvents()).toBe(2);
     expect(await recordingHandler(recordingEvent(composition!.arn))).toEqual(archived);
+    expect(endedEvents()).toBe(3);
+    // 時間が経ってから再度停止しても冪等(状態・endedAt は不変、イベントは再送。重複はクライアントが許容する)。
+    advance(60_000);
+    expect(BroadcastSchema.parse((await api('POST', '/broadcast/stop', { token: adminAgain, body: {} })).json)).toEqual(stopped);
+    expect(endedEvents()).toBe(4);
+    expect(BroadcastSchema.parse((await api('GET', '/broadcast', { token: viewerAgain })).json)).toMatchObject({ status: 'ended', endedAt });
 
     expect(ArchivesResponseSchema.parse((await api('GET', '/archives', { token: viewerAgain })).json)).toEqual([]);
     const [archive] = ArchivesResponseSchema.parse((await api('GET', '/archives', { token: adminAgain })).json);
