@@ -44,7 +44,14 @@ describe('shared schemas', () => {
     expect(StageTokenResponseSchema.safeParse({ tokens: [] }).success).toBe(false);
     expect(CommentSuspensionRequestSchema.safeParse({ suspended: 'yes' }).success).toBe(false);
     expect(SlideOrderRequestSchema.safeParse({ ids: ['a'] }).success).toBe(true);
-    expect(SlideUploadUrlResponseSchema.safeParse({ url: 'https://example.test', fields: {} }).success).toBe(true);
+    expect(SlideUploadUrlResponseSchema.safeParse({ slideId: 's1', url: 'https://example.test', fields: {} }).success).toBe(true);
+    expect(SlideUploadUrlResponseSchema.safeParse({ url: 'https://example.test', fields: {} }).success).toBe(false);
+    const archive = { id: 'a1', title: 't', published: false, durationSeconds: 0, playbackPath: '/files/archives/a1/multivariant.m3u8' };
+    expect(ArchivesResponseSchema.safeParse([archive]).success).toBe(true);
+    expect(ArchivesResponseSchema.safeParse([{ ...archive, playbackPath: 'https://evil.test/x.m3u8' }]).success).toBe(false);
+    const user = { userId: 'u', email: 'a@example.com', loginMethod: 'email', role: 'viewer', enabled: true, commentSuspended: false, lastLoginAt: null };
+    expect(UsersResponseSchema.safeParse([user]).success).toBe(true);
+    expect(UsersResponseSchema.safeParse([{ ...user, commentSuspended: undefined }]).success).toBe(false);
     expect(InviteUsersRequestSchema.safeParse({ emails: [], role: 'admin' }).success).toBe(false);
     expect(UpdateRoleRequestSchema.safeParse({ role: 'fake' }).success).toBe(false);
     expect(CHAT_EVENTS).toEqual(['broadcast-started', 'broadcast-ended', 'slides-updated', 'archives-updated']);
