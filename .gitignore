@@ -9,3 +9,4 @@ cdk.out/
 !.env.example
 .DS_Store
 *.tsbuildinfo
+.pnpm-store/
