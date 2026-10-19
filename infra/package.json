@@ -1,6 +1,23 @@
 {
-  "name": "infra", "version": "0.1.0", "private": true, "type": "module",
-  "scripts": { "typecheck": "tsc --noEmit", "lint": "eslint src", "test": "vitest run --passWithNoTests", "mutation": "echo 'No mutation targets'", "synth": "cdk synth" },
-  "dependencies": { "aws-cdk-lib": "^2.220.0", "constructs": "^10.4.2" },
-  "devDependencies": { "typescript": "^5.9.3", "vitest": "^3.2.4", "aws-cdk": "^2.1033.0" }
+  "name": "infra",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src bin test",
+    "test": "vitest run",
+    "mutation": "stryker run",
+    "synth": "cdk synth",
+    "deploy": "pnpm --filter api build && pnpm --filter web build && cdk deploy --all"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.220.0",
+    "constructs": "^10.4.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4",
+    "aws-cdk": "^2.1033.0"
+  }
 }
