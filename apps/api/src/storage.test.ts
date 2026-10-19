@@ -28,6 +28,14 @@ describe('deletePrefix', () => {
     ]);
   });
 
+  it('adds a trailing separator to a prefix that already starts with a slash', async () => {
+    mock.on(ListObjectsV2Command).resolves({ Contents: [] });
+    await expect(deletePrefix(s3, 'recordings', '/archive')).resolves.toBe(0);
+    expect(mock.commandCalls(ListObjectsV2Command).map((call) => call.args[0].input)).toEqual([
+      { Bucket: 'recordings', Prefix: '/archive/' },
+    ]);
+  });
+
   it.each(['', '/'])('refuses an empty prefix %j without listing', async (prefix) => {
     await expect(deletePrefix(s3, 'recordings', prefix)).rejects.toThrow('Refusing to delete an empty S3 prefix');
     expect(mock.commandCalls(ListObjectsV2Command)).toHaveLength(0);

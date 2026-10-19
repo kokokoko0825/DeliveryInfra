@@ -86,6 +86,31 @@ afterEach(() => {
 });
 
 describe('API router', () => {
+  it.each([
+    ['POST', '/me'], ['GET', '/me/display-name'], ['PUT', '/broadcast'],
+    ['GET', '/broadcast/start'], ['GET', '/broadcast/stop'], ['POST', '/broadcast/stats'], ['POST', '/status'],
+    ['GET', '/tokens/stage'], ['POST', '/devices'], ['POST', '/devices/names'],
+    ['GET', `/devices/camera.1.${UUID}/heartbeat`], ['POST', `/devices/camera.1.${UUID}`],
+    ['GET', '/tokens/chat'], ['POST', '/comments/recent'], ['GET', '/comments/m-1'],
+    ['GET', '/users/u-2/comment-suspension'], ['POST', '/comments/export'],
+    ['PUT', '/ng-words'], ['POST', '/ng-words/blocked'], ['POST', '/slides'],
+    ['GET', '/slides/upload-url'], ['GET', '/slides/s-1/complete'], ['POST', '/slides/order'],
+    ['POST', '/slides/s-1'], ['POST', '/archives'], ['GET', '/archives/a-1/cookies'],
+    ['GET', '/archives/a-1'], ['GET', '/files/cookies'], ['POST', '/users'],
+    ['GET', '/users/invite'], ['GET', '/users/u-2/resend-invite'], ['POST', '/users/u-2/role'],
+    ['GET', '/users/u-2/disable'], ['GET', '/users/u-2/enable'], ['POST', '/users/u-2'],
+  ] as const)('returns exact 404 for unsupported method %s %s', async (method, path) => {
+    const response = await request('admin', method, path);
+    expect(response.statusCode).toBe(404);
+    expect(data(response)).toEqual({ error: { code: 'NOT_FOUND', message: '対象が見つかりません' } });
+    expect(ddb.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ddb.commandCalls(UpdateCommand)).toHaveLength(0);
+    expect(ddb.commandCalls(DeleteCommand)).toHaveLength(0);
+    expect(ivs.calls()).toHaveLength(0);
+    expect(chat.calls()).toHaveLength(0);
+    expect(cognito.calls()).toHaveLength(0);
+    expect(s3.calls()).toHaveLength(0);
+  });
   it('rejects unauthenticated calls before routing', async () => {
     const handler = createApiHandler({ env, clients, authenticate: vi.fn().mockRejectedValue(new HttpError(401, 'UNAUTHORIZED', 'login')) });
     await expect(handler(makeEvent('GET', '/me'))).resolves.toMatchObject({ statusCode: 401 });
@@ -156,8 +181,29 @@ describe('API router', () => {
     expect(occupied.size).toBe(limit);
     expect([...occupied].every((key) => key.startsWith(`DEVICE|${purpose}#`))).toBe(true);
   });
+  it.each([
+    ['missing token', { participantId: 'participant', expirationTime: new Date('2026-01-01T00:00:00Z') }],
+    ['missing participant ID', { token: 'signed-token', expirationTime: new Date('2026-01-01T00:00:00Z') }],
+    ['missing expiration', { token: 'signed-token', participantId: 'participant' }],
+  ] as const)('returns TOKEN_ISSUE_FAILED and releases its reserved slot when IVS returns a token without %s', async (_caseName, participantToken) => {
+    ivs.on(CreateParticipantTokenCommand).resolves({ participantToken: participantToken as never });
+    const response = await request('camera', 'POST', '/tokens/stage', { purpose: 'camera', deviceName: 'CAM1' });
+    expect(response.statusCode).toBe(502);
+    expect(data(response).error).toEqual({ code: 'TOKEN_ISSUE_FAILED', message: '参加トークンを発行できませんでした' });
+    expect(ddb.commandCalls(DeleteCommand).map((call) => call.args[0].input)).toEqual([{
+      TableName: 'table', Key: { PK: 'DEVICE', SK: 'camera#1' }, ConditionExpression: 'deviceId = :deviceId',
+      ExpressionAttributeValues: { ':deviceId': expect.stringMatching(/^camera\.1\.[0-9a-f-]{36}$/u) },
+    }]);
+    expect(ddb.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
   it('issues viewer tokens without consuming a sending slot', async () => {
-    await expect(request('viewer', 'POST', '/tokens/stage', { purpose: 'viewer' })).resolves.toMatchObject({ statusCode: 200, body: expect.stringContaining('signed-token') });
+    const response = await request('viewer', 'POST', '/tokens/stage', { purpose: 'viewer' });
+    expect(response.statusCode).toBe(200);
+    expect(data(response).tokens).toEqual([{ stage: 'broadcast', token: 'signed-token', participantId: 'participant', capabilities: ['PUBLISH'], expiresAt: '2026-01-01T00:00:00.000Z' }]);
+    expect(ivs.commandCalls(CreateParticipantTokenCommand).map((call) => call.args[0].input)).toEqual([{
+      stageArn: 'broadcast', duration: 10, userId: 'user-1', capabilities: ['SUBSCRIBE'], attributes: undefined,
+    }]);
     expect(ddb.commandCalls(PutCommand)).toHaveLength(0);
   });
 });
@@ -518,6 +564,20 @@ describe('API router endpoint behavior', () => {
     expect(data(await request('admin', 'GET', '/broadcast/stats'))).toEqual({ viewerCount: 0 });
   });
 
+  it('uses any live stage session to report an active stage', async () => {
+    ivs.on(GetStageCommand).resolves({ stage: { arn: 'stage', activeSessionId: undefined } });
+    ivs.on(ListStageSessionsCommand).resolves({ stageSessions: [
+      { sessionId: 'active-session' },
+      { sessionId: 'ended-session', endTime: new Date('2026-01-01T00:00:00Z') },
+    ] });
+    chat.on(GetRoomCommand).resolves({ arn: 'room' });
+    const result = data(await request('admin', 'GET', '/status'));
+    expect(result.stages).toEqual(['production', 'slide', 'broadcast'].map((name) => ({ name, exists: true, status: 'ACTIVE' })));
+    expect(ivs.commandCalls(ListStageSessionsCommand).map((call) => call.args[0].input)).toEqual([
+      { stageArn: 'prod', maxResults: 1 }, { stageArn: 'slide', maxResults: 1 }, { stageArn: 'broadcast', maxResults: 1 },
+    ]);
+  });
+
   it('reports missing stages and chat rooms as not existing', async () => {
     ivs.on(GetStageCommand).callsFake(async ({ arn }) => arn === 'slide' ? Promise.reject(awsError('ResourceNotFoundException')) : ({ stage: { activeSessionId: arn === 'prod' ? 'active' : undefined } }));
     ivs.on(ListStageSessionsCommand).callsFake(async ({ stageArn }) => ({ stageSessions: stageArn === 'broadcast' ? [{ sessionId: 'live-session' }] : [] }));
@@ -702,6 +762,15 @@ describe('archives and signed cookies', () => {
     }
   });
 
+  it('rejects an unsafe archive recording prefix before deleting S3 content', async () => {
+    ddb.on(GetCommand, { Key: { PK: 'ARCHIVE', SK: 'unsafe' } }).resolves({ Item: archive('unsafe', { recordingPrefix: '../private' }) });
+    const response = await request('admin', 'DELETE', '/archives/unsafe');
+    expect(response.statusCode).toBe(500);
+    expect(data(response).error).toEqual({ code: 'INTERNAL_ERROR', message: '処理に失敗しました' });
+    expect(s3.commandCalls(ListObjectsV2Command)).toHaveLength(0);
+    expect(ddb.commandCalls(DeleteCommand)).toHaveLength(0);
+  });
+
   it('deletes an archive under its exact recording prefix', async () => {
     ddb.on(GetCommand).resolves({ Item: archive('a-1') });
     s3.on(ListObjectsV2Command).resolves({ Contents: [{ Key: 'stage/a-1/d/composite/file.m3u8' }] });
@@ -729,6 +798,17 @@ describe('archives and signed cookies', () => {
     expect(getSignedCookies).not.toHaveBeenCalled();
   });
 
+  it('rejects a cookie request without a forwarded CloudFront host', async () => {
+    const noHost = makeEvent('POST', '/files/cookies');
+    noHost.headers = { 'X-Auth-Token': 'access-token' };
+    const handler = createApiHandler({ env, clients, authenticate: vi.fn().mockResolvedValue({ userId: 'user-1', username: 'name', role: 'viewer' }) });
+    const response = await handler(noHost);
+    expect(response.statusCode).toBe(500);
+    expect(data(response).error).toEqual({ code: 'INTERNAL_ERROR', message: '処理に失敗しました' });
+    expect(getSignedCookies).not.toHaveBeenCalled();
+    expect(ssm.commandCalls(GetParameterCommand)).toHaveLength(0);
+  });
+
   it('signs per-archive cookies for published archives only, except for admins (R1-08)', async () => {
     ddb.on(GetCommand, { Key: { PK: 'ARCHIVE', SK: 'pub' } }).resolves({ Item: archive('pub') });
     ddb.on(GetCommand, { Key: { PK: 'ARCHIVE', SK: 'priv' } }).resolves({ Item: archive('priv', { published: false }) });
@@ -742,6 +822,18 @@ describe('archives and signed cookies', () => {
     expect((await request('viewer', 'POST', '/archives/missing/cookies')).statusCode).toBe(404);
     expect((await request('admin', 'POST', '/archives/old/cookies')).statusCode).toBe(404);
     expect(getSignedCookies).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    { Type: 'String', Value: 'not-secure' },
+    { Type: 'SecureString', Value: undefined },
+  ] as const)('rejects missing or non-SecureString CloudFront key parameters', async (Parameter) => {
+    ssm.on(GetParameterCommand).resolves({ Parameter });
+    const noCacheRequest = createApiHandler({ env, clients, authenticate: vi.fn().mockResolvedValue({ userId: 'user-1', username: 'name', role: 'admin' }), now: () => Date.parse('2030-01-01T02:00:00Z') });
+    const response = await noCacheRequest(makeEvent('POST', '/files/cookies'));
+    expect(response.statusCode).toBe(500);
+    expect(data(response).error).toEqual({ code: 'SIGNING_KEY_MISSING', message: 'SSM SecureString の署名鍵を取得できません' });
+    expect(getSignedCookies).not.toHaveBeenCalled();
   });
 
   it('reuses the SecureString key before its 55-minute expiry and refreshes exactly at expiry', async () => {
@@ -888,10 +980,42 @@ describe('user management', () => {
     expect(ddb.commandCalls(BatchGetCommand)[0]?.args[0].input.RequestItems?.table?.Keys).toHaveLength(6);
   });
 
+  it('follows Cognito user and group pagination using exact request tokens', async () => {
+    cognito.on(ListUsersCommand)
+      .resolvesOnce({ Users: [{ Username: 'first', Attributes: [{ Name: 'sub', Value: 'u1' }, { Name: 'email', Value: 'one@example.test' }] }], PaginationToken: 'users-next' })
+      .resolves({ Users: [{ Username: 'second', Attributes: [{ Name: 'sub', Value: 'u2' }, { Name: 'email', Value: 'two@example.test' }] }] });
+    cognito.on(ListUsersInGroupCommand).callsFake(async ({ GroupName, NextToken }) => {
+      if (GroupName === 'admin' && !NextToken) return { Users: [{ Username: 'first' }], NextToken: 'admin-next' };
+      if (GroupName === 'admin' && NextToken === 'admin-next') return { Users: [{ Username: 'second' }] };
+      return { Users: [] };
+    });
+    const result = UsersResponseSchema.parse(data(await request('admin', 'GET', '/users')));
+    expect(result.map(({ userId, role }) => ({ userId, role }))).toEqual([{ userId: 'u1', role: 'admin' }, { userId: 'u2', role: 'admin' }]);
+    expect(cognito.commandCalls(ListUsersCommand).map((call) => call.args[0].input)).toEqual([
+      { UserPoolId: 'pool', PaginationToken: undefined, Limit: 60 },
+      { UserPoolId: 'pool', PaginationToken: 'users-next', Limit: 60 },
+    ]);
+    expect(cognito.commandCalls(ListUsersInGroupCommand).map((call) => call.args[0].input)).toEqual([
+      { UserPoolId: 'pool', GroupName: 'admin', NextToken: undefined, Limit: 60 },
+      { UserPoolId: 'pool', GroupName: 'admin', NextToken: 'admin-next', Limit: 60 },
+      ...['camera', 'audio', 'presenter', 'viewer'].map((GroupName) => ({ UserPoolId: 'pool', GroupName, NextToken: undefined, Limit: 60 })),
+    ]);
+  });
+
   it('returns a null role for users without any role group (R2-04)', async () => {
     cognito.on(ListUsersCommand).resolves({ Users: [{ Username: 'none', Enabled: true, Attributes: [{ Name: 'sub', Value: 'none' }, { Name: 'email', Value: 'none@example.test' }] }] });
     const users = UsersResponseSchema.parse(data(await request('admin', 'GET', '/users')));
     expect(users.map((item) => item.role)).toEqual([null]);
+  });
+
+  it('sends exactly one BatchGet request for exactly 100 profile records', async () => {
+    cognito.on(ListUsersCommand).resolves({ Users: Array.from({ length: 50 }, (_, index) => ({ Username: `u${index}`, Attributes: [{ Name: 'sub', Value: `s${index}` }] })) });
+    ddb.on(BatchGetCommand).resolves({ Responses: { table: [] } });
+    const response = await request('admin', 'GET', '/users');
+    expect(response.statusCode).toBe(200);
+    expect(ddb.commandCalls(BatchGetCommand).map((call) => call.args[0].input.RequestItems?.table?.Keys)).toEqual([
+      Array.from({ length: 100 }, (_, index) => ({ PK: `USER#s${Math.floor(index / 2)}`, SK: index % 2 === 0 ? 'PROFILE' : 'LOGIN' })),
+    ]);
   });
 
   it('chunks BatchGet requests at 100 keys and retries unprocessed keys', async () => {
