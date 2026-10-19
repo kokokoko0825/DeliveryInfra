@@ -13,7 +13,14 @@
     "src/lib/ivs/stage.ts",
     "src/lib/ivs/managedSession.ts",
     "src/lib/ivs/mediaApi.ts",
-    "!src/**/*.test.ts"
+    "src/features/switcher/media/compositor.ts",
+    "src/features/switcher/media/audioGraph.ts",
+    "src/features/switcher/media/videoRegistry.ts",
+    "src/features/switcher/media/frameClock.ts",
+    "src/features/archives/HlsPlayer.tsx",
+    "src/features/viewer/VideoPlayer.tsx",
+    "!src/**/*.test.ts",
+    "!src/**/*.test.tsx"
   ],
   "tempDirName": ".stryker-tmp-media",
   "reporters": ["clear-text", "html", "json", "progress"],

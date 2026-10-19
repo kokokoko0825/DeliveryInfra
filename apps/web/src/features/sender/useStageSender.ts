@@ -5,16 +5,20 @@ import { createManagedSession, type ManagedSession } from '@/lib/ivs/managedSess
 import { releaseDevice, requestStageTokens, sendHeartbeat, tokenFor } from '@/lib/ivs/mediaApi';
 import type { PublishTrack } from '@/lib/ivs/stage';
 import { holdWakeLock } from '@/lib/ivs/wakeLock';
-import { classifyError, initialSenderState, isActive, senderReducer } from './engine/session';
+import { classifyError, initialSenderState, isActive, senderReducer, type SenderErrorKind } from './engine/session';
 
 export const HEARTBEAT_INTERVAL_MS = 15_000;
 
 type SenderPurpose = 'camera' | 'mic' | 'slide';
 const STAGE_OF: Record<SenderPurpose, StageName> = { camera: 'production', mic: 'production', slide: 'slide' };
 
+/** 再接続中に受けたら取り合わずに止めるエラー（端末名が他の端末に使われている）。 */
+const NAME_TAKEN: readonly SenderErrorKind[] = ['nameInUse', 'nameInUseSelf'];
+
 /**
  * 1つのステージへ PUBLISH する送信セッション。
  * トークン発行（枠確保）→ join → 15秒ハートビート → 切断時は枠を返してトークン再発行込みで自動再接続 → 停止時に枠を解放。
+ * 同じ端末名の別端末に引き継がれたとき（サーバーからの切断・ハートビートの DEVICE_REPLACED）は再接続せずに止める（R3-02）。
  */
 export function useStageSender(purpose: SenderPurpose) {
   const [state, dispatch] = useReducer(senderReducer, initialSenderState);
@@ -33,32 +37,58 @@ export function useStageSender(purpose: SenderPurpose) {
     if (id) await releaseDevice(id).catch(() => undefined);
   }, []);
 
+  /** 再接続せずに止めて理由を表示する。 */
+  const fail = useCallback((session: ManagedSession | null, error: SenderErrorKind) => {
+    if (!session || managed.current !== session) return;
+    session.stop();
+    managed.current = null;
+    stopHeartbeat();
+    void release();
+    dispatch({ type: 'FAILED', error });
+  }, [release, stopHeartbeat]);
+
   const startHeartbeat = useCallback(() => {
     stopHeartbeat();
     const id = deviceId.current;
     if (!id) return;
+    const session = managed.current;
     heartbeat.current = setInterval(() => {
       sendHeartbeat(id).catch((error: unknown) => {
+        if (!(error instanceof ApiError)) return;
+        // 同じ端末名の別端末に引き継がれていたら止める。取り直すと相手を切断し合うため
+        if (error.code === 'DEVICE_REPLACED') fail(session, 'replaced');
         // 枠が失効していたら取り直す
-        if (error instanceof ApiError && error.status === 404) managed.current?.restart();
+        else if (error.status === 404) managed.current?.restart();
       });
     }, HEARTBEAT_INTERVAL_MS);
-  }, [stopHeartbeat]);
+  }, [fail, stopHeartbeat]);
 
-  const start = useCallback(async (tracks: PublishTrack[], deviceName?: string, muted = false) => {
+  /** takeover: 本人の別端末が同じ端末名で送信中のとき、この端末に切り替える（初回の取得だけに使う）。 */
+  const start = useCallback(async (tracks: PublishTrack[], deviceName?: string, muted = false, takeover = false) => {
     managed.current?.stop();
     dispatch({ type: 'START' });
-    const session = createManagedSession({
+    let initial = true;
+    const session: ManagedSession = createManagedSession({
       publish: true,
       subscribe: false,
       tracks,
       fetchToken: async () => {
+        const first = initial;
+        initial = false;
         // 再接続時は前の枠を返し終えてから取り直す（上限ちょうどのとき 409 にならないように）
         await release();
-        const response = await requestStageTokens(purpose, deviceName);
-        deviceId.current = response.deviceId;
-        return tokenFor(response, STAGE_OF[purpose]);
+        try {
+          const response = await requestStageTokens(purpose, deviceName, first && takeover);
+          deviceId.current = response.deviceId;
+          return tokenFor(response, STAGE_OF[purpose]);
+        } catch (error) {
+          // 再接続中に端末名を別の端末が使っていたら取り合わずに止める（初回は start の catch で表示する）
+          const kind = classifyError(error);
+          if (!first && NAME_TAKEN.includes(kind)) fail(session, kind);
+          throw error;
+        }
       },
+      onEnded: () => fail(session, 'replaced'),
       onStatus: (status) => {
         if (status === 'connected') {
           startHeartbeat();
@@ -80,7 +110,7 @@ export function useStageSender(purpose: SenderPurpose) {
       void release();
       dispatch({ type: 'FAILED', error: classifyError(error) });
     }
-  }, [purpose, release, startHeartbeat, stopHeartbeat]);
+  }, [fail, purpose, release, startHeartbeat, stopHeartbeat]);
 
   const stop = useCallback(() => {
     managed.current?.stop();

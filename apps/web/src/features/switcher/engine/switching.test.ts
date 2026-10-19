@@ -160,6 +160,19 @@ describe('switcherReducer', () => {
     expect(done.active).toBeNull();
     expect(switcherReducer(done, { type: 'TICK', now: 9999 })).toBe(done);
   });
+  it('keeps a preview chosen during a transition when it completes (R3-06)', () => {
+    const started = switcherReducer(ready({ durationSec: 2 }), { type: 'AUTO', now: 0 });
+    const chosen = switcherReducer(started, { type: 'SELECT_PREVIEW', source: SLIDE });
+    const done = switcherReducer(chosen, { type: 'TICK', now: 2000 });
+    expect(done.program).toEqual({ main: CAM1, pip: null });
+    expect(done.preview).toEqual({ main: SLIDE, pip: null });
+    // PiP の変更も保持する
+    const withPip = switcherReducer(switcherReducer(started, { type: 'SELECT_PREVIEW', source: SLIDE }), { type: 'SET_PIP', pip });
+    expect(switcherReducer(withPip, { type: 'TICK', now: 2000 }).preview).toEqual({ main: SLIDE, pip });
+    // 無効な PiP（変更なし）なら従来どおり直前の番組がプレビューに戻る
+    const rejected = switcherReducer(started, { type: 'SET_PIP', pip: { ...pip, sub: CAM1 } });
+    expect(switcherReducer(rejected, { type: 'TICK', now: 2000 }).preview).toEqual({ main: STANDBY, pip: null });
+  });
   it('CUT during a transition finishes it at once', () => {
     const started = switcherReducer(ready(), { type: 'AUTO', now: 0 });
     const cut = switcherReducer(started, { type: 'CUT' });

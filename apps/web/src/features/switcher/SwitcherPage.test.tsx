@@ -12,16 +12,21 @@ const graph = vi.hoisted(() => ({
   levels: vi.fn(() => ({ channels: new Map(), master: 0 })), close: vi.fn(),
 }));
 const clock = vi.hoisted(() => ({ tick: null as null | (() => void) }));
+const renders = vi.hoisted(() => ({ comments: 0 }));
 vi.mock('@/lib/ivs/stage', () => stageMock(sessions));
 vi.mock('@/lib/ivs/mediaApi', async (importOriginal) => ({ ...(await importOriginal<typeof import('@/lib/ivs/mediaApi')>()), ...api }));
 vi.mock('./media/audioGraph', () => ({ createAudioGraph: () => graph }));
 vi.mock('./media/frameClock', () => ({ startFrameClock: (_fps: number, tick: () => void) => { clock.tick = tick; return () => { clock.tick = null; }; } }));
 vi.mock('@/features/viewer/CommentPanel', () => ({
   useAdminModeration: () => ({ onDelete: vi.fn(), onSuspend: vi.fn() }),
-  CommentPanel: ({ moderation }: { moderation?: unknown }) => <section aria-label="コメント">{moderation ? 'moderation' : 'viewer'}</section>,
+  CommentPanel: ({ moderation }: { moderation?: unknown }) => {
+    renders.comments += 1;
+    return <section aria-label="コメント">{moderation ? 'moderation' : 'viewer'}</section>;
+  },
 }));
 
 const { default: SwitcherPage } = await import('./SwitcherPage');
+const { createStageSession } = await import('@/lib/ivs/stage');
 
 const idle = { id: 'b0', title: '', status: 'idle', startedAt: null, endedAt: null };
 const live = { id: 'b1', title: '定例会', status: 'live', startedAt: new Date(Date.now() - 65_000).toISOString(), endedAt: null };
@@ -103,6 +108,45 @@ describe('SwitcherPage (A-01)', () => {
     now.mockRestore();
   });
 
+  it('does not switch the program when Enter/Space opens the shortcut list (R3-05)', async () => {
+    renderPage();
+    await startSwitcher();
+    fireEvent.keyDown(window, { key: '7' });
+    const summary = screen.getByText('キーボードショートカット');
+    fireEvent.keyDown(summary, { key: 'Enter' });
+    fireEvent.keyDown(summary, { key: ' ' });
+    expect(tile(/^7: スライド/)).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.queryByRole('button', { name: /番組出力中/ })).toHaveAccessibleName(/^8: 待機画面/);
+  });
+
+  it('keeps the preview chosen during a transition (R3-06)', async () => {
+    renderPage();
+    await startSwitcher();
+    fireEvent.keyDown(window, { key: '7' });
+    const now = vi.spyOn(performance, 'now').mockReturnValue(1000);
+    fireEvent.keyDown(window, { key: 'Enter' });
+    fireEvent.keyDown(window, { key: '8' });
+    now.mockReturnValue(1600);
+    act(() => clock.tick?.());
+    expect(tile(/^7: スライド.*番組出力中/)).toBeInTheDocument();
+    expect(tile(/^8: 待機画面/)).toHaveAttribute('aria-pressed', 'true');
+    now.mockRestore();
+  });
+
+  it('updates level meters without re-rendering the whole page (R3-10)', async () => {
+    renderPage();
+    await startSwitcher();
+    graph.levels.mockReturnValue({ channels: new Map(), master: 50 });
+    const masterIndicator = () => screen.getByRole('progressbar', { name: '全体 のレベル' }).querySelector<HTMLElement>('[data-slot="progress-indicator"]');
+    await waitFor(() => expect(masterIndicator()?.style.transform).toBe('translateX(-50%)'));
+    const before = renders.comments;
+    const calls = graph.levels.mock.calls.length;
+    await act(() => new Promise((resolve) => setTimeout(resolve, 650)));
+    expect(graph.levels.mock.calls.length).toBeGreaterThan(calls + 2);
+    expect(renders.comments).toBe(before);
+    graph.levels.mockReturnValue({ channels: new Map(), master: 0 });
+  });
+
   it('ignores shortcuts while typing in an input', async () => {
     renderPage();
     await startSwitcher();
@@ -165,7 +209,8 @@ describe('SwitcherPage (A-01)', () => {
   });
 
   it('resumes publishing when opened during a live broadcast and stops after confirmation', async () => {
-    api.fetchBroadcast.mockResolvedValue(live);
+    // 経過時間はテスト開始時点から数える（ファイル読み込みからの時間に左右されないように）
+    api.fetchBroadcast.mockResolvedValue({ ...live, startedAt: new Date(Date.now() - 65_000).toISOString() });
     renderPage();
     expect(await screen.findByText('LIVE')).toBeInTheDocument();
     expect(screen.getByText(/^0:01:0/)).toBeInTheDocument();
@@ -177,6 +222,37 @@ describe('SwitcherPage (A-01)', () => {
     await waitFor(() => expect(api.stopBroadcast).toHaveBeenCalled());
     await waitFor(() => expect(sessionFor('tok-broadcast')?.leave).toHaveBeenCalled());
     expect(sessions.filter((session) => session.token === 'tok-broadcast')).toHaveLength(1);
+  });
+
+  it('keeps retrying to resume the program when the first attempt fails (R3-04)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const create = vi.mocked(createStageSession);
+    const original = create.getMockImplementation()!;
+    let failed = false;
+    create.mockImplementation((token, options, handlers) => {
+      const session = original(token, options, handlers);
+      // 最初の番組送信の join だけ失敗させる（一瞬の回線不調）
+      if (token === 'tok-broadcast' && !failed) {
+        failed = true;
+        vi.mocked(session.join).mockRejectedValueOnce(new Error('join failed'));
+      }
+      return session;
+    });
+    api.fetchBroadcast.mockResolvedValue(live);
+    renderPage();
+    expect(await screen.findByText('LIVE')).toBeInTheDocument();
+    await startSwitcher();
+    await waitFor(() => expect(sessionFor('tok-broadcast')).toBeDefined());
+    await act(() => vi.advanceTimersByTimeAsync(2000));
+    const broadcasts = () => sessions.filter((session) => session.token === 'tok-broadcast');
+    await waitFor(() => expect(broadcasts()).toHaveLength(2));
+    expect(broadcasts()[1]?.join).toHaveBeenCalled();
+    expect(screen.getByText('配信用:').parentElement).toHaveTextContent('接続済み');
+    // 再開できた後は重ねて送信を始めない
+    await act(() => vi.advanceTimersByTimeAsync(10_000));
+    expect(broadcasts()).toHaveLength(2);
+    create.mockImplementation(original);
+    vi.useRealTimers();
   });
 
   it('enables PiP on the preview with corner and size choices', async () => {

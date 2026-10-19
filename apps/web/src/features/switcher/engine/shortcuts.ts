@@ -24,8 +24,15 @@ export function keyToAction(key: string, slots: readonly (string | null)[]): Sho
 export type KeyTarget = { tagName?: string; isContentEditable?: boolean; role?: string | null };
 const TEXT_TAGS = ['INPUT', 'TEXTAREA', 'SELECT'];
 const TEXT_ROLES = ['textbox', 'combobox', 'searchbox', 'spinbutton', 'slider'];
-const ACTIVATING_TAGS = ['BUTTON', 'A'];
-const ACTIVATING_ROLES = ['button', 'switch', 'tab', 'radio', 'checkbox', 'menuitem', 'option'];
+// SUMMARY は Enter/Space で details を開閉する（R3-05）
+const ACTIVATING_TAGS = ['BUTTON', 'A', 'SUMMARY'];
+const ACTIVATING_ROLES = ['button', 'link', 'switch', 'tab', 'radio', 'checkbox', 'menuitem', 'option'];
+
+/** キー入力の対象として扱う要素。フォーカス要素の内側（例: summary 内の span）から最も近いものを選ぶ。 */
+export const INTERACTIVE_SELECTOR = [
+  ...TEXT_TAGS, ...ACTIVATING_TAGS, '[contenteditable="true"]',
+  ...[...TEXT_ROLES, ...ACTIVATING_ROLES].map((role) => `[role="${role}"]`),
+].join(',').toLowerCase();
 
 /**
  * ショートカットを無効にする場面か。

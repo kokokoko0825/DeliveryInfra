@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { PageHeader } from '@/components/app/PageHeader';
 import { ErrorText, LoadingView } from '@/components/app/StatusView';
 import { errorMessage } from '@/lib/api';
-import { archiveCookiesPath, useFileCookies } from '@/lib/files';
+import { archiveCookiesPath, ensureFileCookies, useFileCookies } from '@/lib/files';
 import { formatDuration } from '@/lib/format';
 import { queryKeys } from '@/lib/query-keys';
 import { fetchArchives } from './api';
@@ -29,7 +29,7 @@ export default function ArchiveDetailPage() {
       {archive && (
         <>
           <PageHeader title={archive.title} description={`再生時間 ${formatDuration(archive.durationSeconds)}`} />
-          {cookies.data && <HlsPlayer src={archive.playbackPath} title={archive.title} />}
+          {cookies.data && <HlsPlayer src={archive.playbackPath} title={archive.title} refreshCookies={() => ensureFileCookies(archiveCookiesPath(id), Date.now, true)} />}
         </>
       )}
     </div>

@@ -20,6 +20,8 @@ export type StageSessionHandlers = {
   onParticipantLeft?: (participant: RemoteParticipant) => void;
   /** 自動再接続の対象となる切断（ERRORED 含む）。 */
   onRecoverableLoss?: (reason: string) => void;
+  /** サーバー側からの切断・ステージ削除など、再接続しない終了（自分で leave した場合は呼ばない）。 */
+  onEnded?: (reason: string) => void;
 };
 
 export type StageSession = {
@@ -58,6 +60,7 @@ export function createStageSession(token: string, options: StageSessionOptions, 
   });
   stage.on(StageEvents.STAGE_LEFT, (reason) => {
     if (isRecoverableLeave(String(reason))) handlers.onRecoverableLoss?.(String(reason));
+    else if (String(reason) !== 'user-initiated') handlers.onEnded?.(String(reason));
   });
 
   return {

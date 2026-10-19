@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react
 import { Hub } from 'aws-amplify/utils';
 import { MeResponseSchema, type MeResponse } from '@delivery/shared';
 import { ApiError, apiFetch, errorMessage, setTokenProvider, setUnauthorizedHandler } from '@/lib/api';
-import { configureAuth, getAccessToken, logout as amplifyLogout } from '@/lib/auth';
+import { configureAuth, getAccessToken, logout as amplifyLogout, redirectErrorMessage } from '@/lib/auth';
 import { loadRuntimeConfig, type RuntimeConfig } from '@/lib/config';
 import { resetFileCookies } from '@/lib/files';
 import { AuthContext, type AuthContextValue, type AuthStatus } from './auth-context';
@@ -14,6 +14,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [me, setMeState] = useState<MeResponse | null>(null);
   const [config, setConfig] = useState<RuntimeConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loginError, setLoginError] = useState<string | null>(null);
 
   const signOutLocally = useCallback(() => {
     setMeState(null);
@@ -54,7 +55,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setStatus('error');
       });
     const stopListening = Hub.listen('auth', ({ payload }) => {
-      if (payload.event === 'signInWithRedirect') void refresh();
+      if (payload.event === 'signInWithRedirect') { setLoginError(null); void refresh(); }
+      if (payload.event === 'signInWithRedirect_failure') setLoginError(redirectErrorMessage(payload.data?.error));
       if (payload.event === 'tokenRefresh_failure' || payload.event === 'signedOut') signOutLocally();
     });
     return () => {
@@ -70,9 +72,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [signOutLocally]);
 
   const value = useMemo<AuthContextValue>(() => ({
-    status, me, config, error, refresh, logout,
+    status, me, config, error, loginError, refresh, logout,
     setMe: (profile) => { setMeState(profile); setStatus('signedIn'); },
-  }), [status, me, config, error, refresh, logout]);
+  }), [status, me, config, error, loginError, refresh, logout]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

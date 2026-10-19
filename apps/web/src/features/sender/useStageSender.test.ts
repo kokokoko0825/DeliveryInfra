@@ -27,7 +27,7 @@ describe('useStageSender', () => {
   it('publishes to the production stage with the device name and holds a wake lock', async () => {
     const { result } = renderHook(() => useStageSender('camera'));
     await act(() => result.current.start(tracks, 'CAM2'));
-    expect(api.requestStageTokens).toHaveBeenCalledWith('camera', 'CAM2');
+    expect(api.requestStageTokens).toHaveBeenCalledWith('camera', 'CAM2', false);
     expect(sessions[0]).toMatchObject({ token: 'tok-production', options: { publish: true, subscribe: false, tracks } });
     expect(result.current.state.status).toBe('live');
     expect(wakeLock.request).toHaveBeenCalledWith('screen');
@@ -37,7 +37,7 @@ describe('useStageSender', () => {
     api.requestStageTokens.mockReset().mockResolvedValue(tokenResponse(['slide'], 'dev-s'));
     const { result } = renderHook(() => useStageSender('slide'));
     await act(() => result.current.start(tracks));
-    expect(api.requestStageTokens).toHaveBeenCalledWith('slide', undefined);
+    expect(api.requestStageTokens).toHaveBeenCalledWith('slide', undefined, false);
     expect(sessions[0]?.token).toBe('tok-slide');
   });
 
@@ -114,6 +114,63 @@ describe('useStageSender', () => {
     expect(result.current.state.status).toBe('reconnecting');
     await act(() => vi.advanceTimersByTimeAsync(1000));
     expect(sessions).toHaveLength(2);
+  });
+
+  it('shows a taken device name instead of a network error and does not retry (R3-01)', async () => {
+    api.requestStageTokens.mockReset().mockRejectedValue(new ApiError(409, 'DEVICE_NAME_IN_USE', '使用中'));
+    const { result } = renderHook(() => useStageSender('mic'));
+    await act(() => result.current.start(tracks, 'MIC1'));
+    expect(result.current.state).toMatchObject({ status: 'error', error: 'nameInUse' });
+    await act(() => vi.advanceTimersByTimeAsync(60_000));
+    expect(api.requestStageTokens).toHaveBeenCalledTimes(1);
+  });
+
+  it('takes over the own device only on the first request when asked (R3-02)', async () => {
+    const { result } = renderHook(() => useStageSender('camera'));
+    await act(() => result.current.start(tracks, 'CAM1', false, true));
+    expect(api.requestStageTokens).toHaveBeenLastCalledWith('camera', 'CAM1', true);
+    act(() => sessions[0]?.handlers.onRecoverableLoss?.('errored'));
+    await act(() => vi.advanceTimersByTimeAsync(1000));
+    // 再接続では引き継がない（引き継ぐと同名端末と切断し合う）
+    expect(api.requestStageTokens).toHaveBeenLastCalledWith('camera', 'CAM1', false);
+    expect(result.current.state.status).toBe('live');
+  });
+
+  it('stops without reconnecting when the server disconnects this device (R3-02)', async () => {
+    const { result } = renderHook(() => useStageSender('camera'));
+    await act(() => result.current.start(tracks, 'CAM1'));
+    act(() => sessions[0]?.handlers.onEnded?.('participant-disconnected'));
+    expect(result.current.state).toMatchObject({ status: 'error', error: 'replaced' });
+    expect(sessions[0]?.leave).toHaveBeenCalled();
+    expect(api.releaseDevice).toHaveBeenCalledWith('dev-1');
+    await act(() => vi.advanceTimersByTimeAsync(60_000));
+    expect(api.requestStageTokens).toHaveBeenCalledTimes(1);
+    expect(api.sendHeartbeat).not.toHaveBeenCalled();
+    expect(sessions).toHaveLength(1);
+  });
+
+  it('stops when the heartbeat says another device took over the name (R3-02)', async () => {
+    api.sendHeartbeat.mockRejectedValue(new ApiError(409, 'DEVICE_REPLACED', '引き継がれました'));
+    const { result } = renderHook(() => useStageSender('camera'));
+    await act(() => result.current.start(tracks, 'CAM1'));
+    await act(() => vi.advanceTimersByTimeAsync(15_000));
+    expect(result.current.state).toMatchObject({ status: 'error', error: 'replaced' });
+    await act(() => vi.advanceTimersByTimeAsync(60_000));
+    expect(api.requestStageTokens).toHaveBeenCalledTimes(1);
+    expect(api.sendHeartbeat).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives up reconnecting when the name was taken meanwhile (R3-02)', async () => {
+    api.requestStageTokens.mockReset()
+      .mockResolvedValueOnce(tokenResponse(['production'], 'dev-1'))
+      .mockRejectedValue(new ApiError(409, 'DEVICE_NAME_IN_USE_SELF', '使用中'));
+    const { result } = renderHook(() => useStageSender('camera'));
+    await act(() => result.current.start(tracks, 'CAM1'));
+    act(() => sessions[0]?.handlers.onRecoverableLoss?.('errored'));
+    await act(() => vi.advanceTimersByTimeAsync(1000));
+    expect(result.current.state).toMatchObject({ status: 'error', error: 'nameInUseSelf' });
+    await act(() => vi.advanceTimersByTimeAsync(60_000));
+    expect(api.requestStageTokens).toHaveBeenCalledTimes(2);
   });
 
   it('ignores transient heartbeat failures', async () => {

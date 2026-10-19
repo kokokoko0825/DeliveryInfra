@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { BroadcastResponseSchema, BroadcastSchema, HeartbeatResponseSchema, StageTokenResponseSchema, StatusResponseSchema, ViewerCountResponseSchema } from '@delivery/shared';
+import { BroadcastResponseSchema, BroadcastSchema, DeviceNamesResponseSchema, HeartbeatResponseSchema, StageTokenResponseSchema, StatusResponseSchema, ViewerCountResponseSchema } from '@delivery/shared';
 
 const apiFetch = vi.hoisted(() => vi.fn());
 vi.mock('@/lib/api', () => ({ apiFetch }));
@@ -20,6 +20,15 @@ describe('mediaApi', () => {
     expect(apiFetch).toHaveBeenLastCalledWith('/tokens/stage', { method: 'POST', body: { purpose: 'camera', deviceName: 'CAM1' }, schema: StageTokenResponseSchema });
     await api.requestStageTokens('switcher');
     expect(apiFetch).toHaveBeenLastCalledWith('/tokens/stage', { method: 'POST', body: { purpose: 'switcher' }, schema: StageTokenResponseSchema });
+    await api.requestStageTokens('camera', 'CAM1', true);
+    expect(apiFetch).toHaveBeenLastCalledWith('/tokens/stage', { method: 'POST', body: { purpose: 'camera', deviceName: 'CAM1', takeover: true }, schema: StageTokenResponseSchema });
+    await api.requestStageTokens('camera', 'CAM1', false);
+    expect(apiFetch).toHaveBeenLastCalledWith('/tokens/stage', { method: 'POST', body: { purpose: 'camera', deviceName: 'CAM1' }, schema: StageTokenResponseSchema });
+  });
+
+  it('fetches device names used by others (R3-01)', async () => {
+    await api.fetchDeviceNamesInUse('mic');
+    expect(apiFetch).toHaveBeenLastCalledWith('/devices/names?purpose=mic', { schema: DeviceNamesResponseSchema });
   });
 
   it('rejects invalid device names before calling the API', () => {

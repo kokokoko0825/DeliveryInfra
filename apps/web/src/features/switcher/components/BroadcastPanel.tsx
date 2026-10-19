@@ -44,7 +44,7 @@ type Props = {
   running: boolean;
   publishing: boolean;
   bitrate: number | null;
-  startPublishing: () => Promise<void>;
+  startPublishing: (options?: { resume?: boolean }) => Promise<void>;
   stopPublishing: () => void;
 };
 
@@ -60,10 +60,10 @@ export function BroadcastPanel({ running, publishing, bitrate, startPublishing, 
   const now = useNow(live);
   const titleCheck = TitleSchema.safeParse(title);
 
-  // 配信中に画面を開き直した場合は番組の送信を再開する
+  // 配信中に画面を開き直した場合は番組の送信を再開する。失敗しても送信は止めず、自動で再試行させる（R3-04）
   useEffect(() => {
     if (running && live && !publishing && !busy) {
-      startPublishing().catch((error: unknown) => toast.error(errorMessage(error)));
+      startPublishing({ resume: true }).catch((error: unknown) => toast.error(`番組の送信を再開できませんでした。自動で再試行します（${errorMessage(error)}）`));
     }
   }, [busy, live, publishing, running, startPublishing]);
 

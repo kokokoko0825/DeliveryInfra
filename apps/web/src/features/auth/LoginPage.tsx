@@ -19,7 +19,7 @@ const LoginSchema = z.object({ email: EmailSchema, password: z.string().min(1, '
 type LoginValues = z.infer<typeof LoginSchema>;
 
 export default function LoginPage() {
-  const { status, me, config, refresh } = useAuth();
+  const { status, me, config, refresh, loginError } = useAuth();
   const navigate = useNavigate();
   const [error, setError] = useState<string | null>(null);
   const form = useForm<LoginValues>({ resolver: zodResolver(LoginSchema), defaultValues: { email: '', password: '' } });
@@ -42,6 +42,8 @@ export default function LoginPage() {
   };
 
   const okta = config?.oauth;
+  // 画面上の操作のエラーを優先し、無ければ Okta から戻ってきたときの失敗理由を出す
+  const shownError = error ?? loginError;
   return (
     <AuthShell title="ログイン" description="招待されたアカウントでログインしてください。">
       <div className="space-y-6">
@@ -71,7 +73,7 @@ export default function LoginPage() {
                 <FormMessage />
               </FormItem>
             )} />
-            {error && <ErrorText message={error} />}
+            {shownError && <ErrorText message={shownError} />}
             <Button type="submit" variant="outline" className="min-h-11 w-full" disabled={form.formState.isSubmitting}>
               {form.formState.isSubmitting && <Loader2 className="animate-spin motion-reduce:animate-none" aria-hidden />}
               メールアドレスでログイン

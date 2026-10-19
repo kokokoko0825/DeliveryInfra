@@ -25,6 +25,11 @@ beforeEach(() => vi.clearAllMocks());
 describe('LoginPage (C-01)', () => {
   const signedOut = (overrides = {}) => makeAuth({ status: 'signedOut', me: null, ...overrides });
 
+  it('shows why the Okta sign-in failed after the redirect (R3-08)', async () => {
+    renderPage(<LoginPage />, { auth: signedOut({ loginError: 'Okta でこのアプリの利用が許可されていません。管理者にアプリの割り当てを確認してください' }) });
+    expect(screen.getByText('Okta でこのアプリの利用が許可されていません。管理者にアプリの割り当てを確認してください')).toBeInTheDocument();
+  });
+
   it('validates email format and required password', async () => {
     renderPage(<LoginPage />, { auth: signedOut() });
     fill('not-an-email', '');

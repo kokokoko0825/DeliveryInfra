@@ -9,7 +9,7 @@ import { PROGRAM_FPS, PROGRAM_SIZE } from './engine/layout';
 import { channelOf, gainOf, initialMixerState, mixerReducer, type ChannelId } from './engine/mixer';
 import { remoteReducer, routeMedia, type ReceiveStage, type RemoteState } from './engine/remote';
 import { STANDBY, type SourceId } from './engine/scene';
-import { healthOf, type SourceHealth } from './engine/sources';
+import { healthOf, sameHealth, type SourceHealth } from './engine/sources';
 import { initialSwitcherState, switcherReducer } from './engine/state';
 import { transitionProgress } from './engine/transition';
 import { createAudioGraph, type AudioGraph } from './media/audioGraph';
@@ -18,7 +18,6 @@ import { startFrameClock } from './media/frameClock';
 import { createVideoRegistry } from './media/videoRegistry';
 
 export const HEALTH_INTERVAL_MS = 500;
-export const LEVEL_INTERVAL_MS = 100;
 export const BITRATE_INTERVAL_MS = 2000;
 export const BROADCAST_VIDEO = { maxVideoBitrateKbps: 2500, maxFramerate: PROGRAM_FPS } as const;
 export const BROADCAST_AUDIO = { maxAudioBitrateKbps: 128, stereo: true } as const;
@@ -39,7 +38,6 @@ export function useSwitcher() {
   const [publishing, setPublishing] = useState(false);
   const [statuses, setStatuses] = useState<StageStatuses>({ production: 'idle', slide: 'idle', broadcast: 'idle' });
   const [health, setHealth] = useState<Map<SourceId, SourceHealth>>(new Map());
-  const [levels, setLevels] = useState<Levels>({ channels: new Map(), master: 0 });
   const [bitrate, setBitrate] = useState<number | null>(null);
   const [standbyImage, setStandbyImage] = useState<Drawable | null>(null);
 
@@ -107,17 +105,14 @@ export function useSwitcher() {
       const frames = registry.sample(now);
       const next = new Map<SourceId, SourceHealth>();
       for (const [source, lastFrameAt] of frames) next.set(source, healthOf({ connected: routed.video.has(source), lastFrameAt }, now));
-      setHealth(next);
+      // 変化がなければ再描画しない（画面全体の再描画は合成と同じメインスレッドを使うため。R3-10）
+      setHealth((current) => (sameHealth(current, next) ? current : next));
     }, HEALTH_INTERVAL_MS);
     return () => clearInterval(timer);
   }, [registry, routed.video, running]);
 
-  // レベルメーター
-  useEffect(() => {
-    if (!running) return undefined;
-    const timer = setInterval(() => { if (graph.current) setLevels(graph.current.levels()); }, LEVEL_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [running]);
+  /** レベルメーターの現在値。100ms ごとの読み取りはメーター側で行い、画面全体を再描画しない（R3-10）。 */
+  const readLevels = useCallback((): Levels => graph.current?.levels() ?? { channels: new Map(), master: 0 }, []);
 
   // 送信ビットレート
   useEffect(() => {
@@ -174,8 +169,13 @@ export function useSwitcher() {
     setPublishing(false);
   }, []);
 
-  /** 番組（合成映像 + ミックス音声）を配信用ステージへ送り始める。 */
-  const startPublishing = useCallback(async () => {
+  /**
+   * 番組（合成映像 + ミックス音声）を配信用ステージへ送り始める。
+   * resume: 配信中に画面を開き直したときの再開。失敗しても送信をやめず、managed session のバックオフ再接続に任せる（R3-04）。
+   */
+  const startPublishing = useCallback(async ({ resume = false }: { resume?: boolean } = {}) => {
+    // 再開を試行中（再接続待ちを含む）なら重ねて始めない
+    if (resume && sessions.current.broadcast) return;
     const canvas = programCanvas.current;
     const audio = graph.current?.track ?? null;
     if (!canvas || typeof canvas.captureStream !== 'function') throw new Error('このブラウザは番組映像の送信に対応していません');
@@ -185,13 +185,21 @@ export function useSwitcher() {
     programTrack.current = video;
     if (!video) throw new Error('番組映像を取得できませんでした');
     const tracks = [{ track: video, config: BROADCAST_VIDEO }, ...(audio ? [{ track: audio, config: BROADCAST_AUDIO }] : [])];
-    const broadcast = createManagedSession({ fetchToken: () => switcherToken('broadcast'), publish: true, subscribe: false, tracks, onStatus: (status) => setStatus('broadcast', status) });
+    const broadcast = createManagedSession({
+      fetchToken: () => switcherToken('broadcast'), publish: true, subscribe: false, tracks,
+      onStatus: (status) => {
+        setStatus('broadcast', status);
+        // 再開の再試行が後から成功した場合も送信中にする
+        if (status === 'connected' && sessions.current.broadcast === broadcast) setPublishing(true);
+      },
+    });
     sessions.current.broadcast = broadcast;
     try {
       await broadcast.start();
-      setPublishing(true);
+      // 接続待ちの間に送信を止めていたら送信中にしない
+      if (sessions.current.broadcast === broadcast) setPublishing(true);
     } catch (error) {
-      stopPublishing();
+      if (!resume) stopPublishing();
       throw error;
     }
   }, [setStatus, stopPublishing, switcherToken]);
@@ -206,7 +214,7 @@ export function useSwitcher() {
   }, [registry]);
 
   return {
-    switcher, dispatch, mixer, mixerDispatch, routed, running, publishing, statuses, health, levels, bitrate,
+    switcher, dispatch, mixer, mixerDispatch, routed, running, publishing, statuses, health, readLevels, bitrate,
     standbyImage, setStandbyImage, programCanvas, previewCanvas, registry, start, startPublishing, stopPublishing,
   };
 }

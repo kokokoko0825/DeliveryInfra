@@ -71,6 +71,22 @@ describe('getAccessToken', () => {
   });
 });
 
+describe('redirectErrorMessage (R3-08)', () => {
+  it('explains Okta assignment and PostConfirmation failures, and falls back to a generic message', () => {
+    const assigned = 'Okta でこのアプリの利用が許可されていません。管理者にアプリの割り当てを確認してください';
+    const setup = 'アカウントの初期設定に失敗しました。時間をおいて再度お試しいただき、解決しない場合は管理者に連絡してください';
+    const generic = 'Okta でログインできませんでした。時間をおいて再度お試しください';
+    expect(auth.redirectErrorMessage(named('OAuthSignInException', 'access_denied'))).toBe(assigned);
+    expect(auth.redirectErrorMessage(new Error('User is not assigned to the client application.'))).toBe(assigned);
+    expect(auth.redirectErrorMessage('unauthorized_client')).toBe(assigned);
+    expect(auth.redirectErrorMessage(new Error('PostConfirmation failed with error boom.'))).toBe(setup);
+    expect(auth.redirectErrorMessage(new Error('PreSignUp failed'))).toBe(setup);
+    expect(auth.redirectErrorMessage(named('OAuthSignInException', 'invalid_request'))).toBe(generic);
+    expect(auth.redirectErrorMessage(undefined)).toBe(generic);
+    expect(auth.redirectErrorMessage({ message: 'access_denied' })).toBe(generic);
+  });
+});
+
 describe('authErrorMessage', () => {
   it('translates Cognito errors', () => {
     expect(auth.authErrorMessage(named('NotAuthorizedException', 'Incorrect username or password.'))).toBe('メールアドレスまたはパスワードが正しくありません');

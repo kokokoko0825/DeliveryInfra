@@ -6,7 +6,7 @@ import {
   MeResponseSchema, NgWordSchema, normalizeForModeration, RecentCommentsResponseSchema, ROLE_PURPOSES,
   ROLES, RoleSchema, SlideOrderRequestSchema, SlideUploadSchema, SlideUploadUrlResponseSchema, SlidesResponseSchema,
   StagePurposeSchema, StageTokenRequestSchema, StageTokenResponseSchema, StatusResponseSchema, UpdateRoleRequestSchema,
-  UsersResponseSchema, ViewerCountResponseSchema, STAGE_LIMITS, FEATURES, UserInviteResponseSchema, InviteFailureSchema,
+  UsersResponseSchema, ViewerCountResponseSchema, DeviceNamesResponseSchema, STAGE_LIMITS, FEATURES, UserInviteResponseSchema, InviteFailureSchema,
 } from './index';
 
 describe('shared schemas', () => {
@@ -41,6 +41,10 @@ describe('shared schemas', () => {
     expect(ApiErrorSchema.safeParse({ error: { code: 'X', message: 'x' } }).success).toBe(true);
     expect(BroadcastStartRequestSchema.safeParse({ title: '' }).success).toBe(false);
     expect(StageTokenRequestSchema.safeParse({ purpose: 'camera', deviceName: 'x'.repeat(17) }).success).toBe(false);
+    expect(StageTokenRequestSchema.safeParse({ purpose: 'camera', deviceName: 'CAM1', takeover: true }).success).toBe(true);
+    expect(StageTokenRequestSchema.safeParse({ purpose: 'camera', deviceName: 'CAM1', takeover: 'yes' }).success).toBe(false);
+    expect(DeviceNamesResponseSchema.safeParse({ inUse: ['CAM1'] }).success).toBe(true);
+    expect(DeviceNamesResponseSchema.safeParse({ inUse: ['CAM 1'] }).success).toBe(false);
     expect(StageTokenResponseSchema.safeParse({ tokens: [] }).success).toBe(false);
     const token = { stage: 'broadcast', token: 't', participantId: 'p', capabilities: ['SUBSCRIBE'], expiresAt: '2026-10-19T00:00:00.000Z' };
     expect(StageTokenResponseSchema.safeParse({ tokens: [token] }).success).toBe(true);

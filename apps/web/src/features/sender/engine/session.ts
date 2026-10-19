@@ -2,7 +2,7 @@
 import { STAGE_LIMITS, type StagePurpose } from '@delivery/shared';
 
 export type SenderStatus = 'idle' | 'starting' | 'live' | 'reconnecting' | 'error';
-export type SenderErrorKind = 'deviceLimit' | 'permission' | 'notFound' | 'busy' | 'forbidden' | 'network';
+export type SenderErrorKind = 'deviceLimit' | 'nameInUse' | 'nameInUseSelf' | 'replaced' | 'permission' | 'notFound' | 'busy' | 'forbidden' | 'network';
 export type SenderState = { status: SenderStatus; error: SenderErrorKind | null; reconnects: number };
 
 export type SenderEvent =
@@ -43,6 +43,9 @@ export function classifyError(error: unknown): SenderErrorKind {
   if (typeof error === 'object' && error !== null) {
     const { code, status, name } = error as { code?: unknown; status?: unknown; name?: unknown };
     if (code === 'DEVICE_LIMIT') return 'deviceLimit';
+    if (code === 'DEVICE_NAME_IN_USE') return 'nameInUse';
+    if (code === 'DEVICE_NAME_IN_USE_SELF') return 'nameInUseSelf';
+    if (code === 'DEVICE_REPLACED') return 'replaced';
     if (status === 401 || status === 403) return 'forbidden';
     if (name === 'NotAllowedError' || name === 'SecurityError') return 'permission';
     if (name === 'NotFoundError' || name === 'OverconstrainedError') return 'notFound';
@@ -54,11 +57,17 @@ export function classifyError(error: unknown): SenderErrorKind {
 const KIND_LABEL: Partial<Record<StagePurpose, string>> = { camera: 'カメラ', mic: 'マイク', slide: 'スライド共有' };
 const LIMIT: Partial<Record<StagePurpose, number>> = STAGE_LIMITS;
 
-export function errorText(error: SenderErrorKind, purpose: StagePurpose): string {
+export function errorText(error: SenderErrorKind, purpose: StagePurpose, deviceName = 'この端末名'): string {
   const label = KIND_LABEL[purpose] ?? '送信';
   switch (error) {
     case 'deviceLimit':
       return `${label}は最大${LIMIT[purpose] ?? 0}台まで接続できます。他の端末の送信が停止するまでお待ちください。`;
+    case 'nameInUse':
+      return `${deviceName} は他の端末が使用中です。別の端末名を選んでください。`;
+    case 'nameInUseSelf':
+      return `${deviceName} はあなたの別の端末で送信中です。この端末に切り替えると、もう一方の送信は停止します。`;
+    case 'replaced':
+      return 'サーバーから切断されたため、この端末の送信を停止しました。同じ端末名の別の端末に切り替えた場合は、そちらで送信を続けてください。';
     case 'permission':
       return `${label}の使用が許可されていません。ブラウザの設定で許可してから、もう一度お試しください。`;
     case 'notFound':

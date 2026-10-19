@@ -4,16 +4,16 @@ import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { useAudioLevel } from './audioLevel';
-import { ConnectionStatus, DeviceNameSelect, ErrorNotice, LevelMeter, SenderShell } from './components';
-import { deviceNameOptions, validateDeviceName } from './engine/deviceName';
+import { ConnectionStatus, DeviceNameSelect, ErrorNotice, LevelMeter, SenderErrorNotice, SenderShell } from './components';
+import { validateDeviceName } from './engine/deviceName';
 import { AUDIO_PUBLISH, micConstraints, toPublishTracks } from './engine/media';
-import { canStart, classifyError, errorText, isActive, type SenderErrorKind } from './engine/session';
+import { canStart, classifyError, isActive, type SenderErrorKind } from './engine/session';
+import { useDeviceName } from './useDeviceName';
 import { useStageSender } from './useStageSender';
 
 export default function MicSendPage() {
   const sender = useStageSender('mic');
-  const options = deviceNameOptions('mic');
-  const [deviceName, setDeviceName] = useState(options[0] ?? '');
+  const { options, deviceName, setDeviceName } = useDeviceName('mic');
   const [track, setTrack] = useState<MediaStreamTrack | null>(null);
   const [muted, setMuted] = useState(false);
   const [mediaError, setMediaError] = useState<SenderErrorKind | null>(null);
@@ -36,10 +36,10 @@ export default function MicSendPage() {
   useEffect(() => () => stream.current?.getTracks().forEach((item) => item.stop()), []);
 
   const nameError = validateDeviceName('mic', deviceName);
-  const start = async () => {
+  const start = async (takeover = false) => {
     const media = await openMic();
     if (!media || nameError) return;
-    await sender.start(toPublishTracks(media.getAudioTracks(), undefined, AUDIO_PUBLISH), deviceName, muted);
+    await sender.start(toPublishTracks(media.getAudioTracks(), undefined, AUDIO_PUBLISH), deviceName, muted, takeover);
   };
   const toggleMute = (value: boolean) => {
     setMuted(value);
@@ -57,7 +57,7 @@ export default function MicSendPage() {
         <Switch id="mic-mute" checked={muted} onCheckedChange={toggleMute} />
       </div>
       {nameError && <ErrorNotice>{nameError}</ErrorNotice>}
-      {error && <ErrorNotice>{errorText(error, 'mic')}</ErrorNotice>}
+      {error && <SenderErrorNotice error={error} purpose="mic" deviceName={deviceName} onTakeover={() => void start(true)} />}
       {isActive(sender.state.status) ? (
         <Button variant="outline" className="h-11 w-full" onClick={sender.stop}><Square aria-hidden />送信停止</Button>
       ) : (

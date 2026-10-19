@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deviceNameOptions, validateDeviceName } from './deviceName';
+import { deviceNameOptions, firstFreeName, validateDeviceName } from './deviceName';
 import {
   AUDIO_PUBLISH, CAMERA_PUBLISH, LEVEL_FLOOR_DB, cameraConstraints, displayMediaOptions, levelPercent, micConstraints, rms, smoothLevel, toPublishTracks,
 } from './media';
@@ -9,6 +9,14 @@ describe('deviceName', () => {
   it('offers CAM1〜CAM6 and MIC1〜MIC5', () => {
     expect(deviceNameOptions('camera')).toEqual(['CAM1', 'CAM2', 'CAM3', 'CAM4', 'CAM5', 'CAM6']);
     expect(deviceNameOptions('mic')).toEqual(['MIC1', 'MIC2', 'MIC3', 'MIC4', 'MIC5']);
+  });
+  it('preselects the first name not used by others (R3-01)', () => {
+    const options = deviceNameOptions('mic');
+    expect(firstFreeName(options, [])).toBe('MIC1');
+    expect(firstFreeName(options, ['MIC1', 'MIC2'])).toBe('MIC3');
+    expect(firstFreeName(options, ['MIC2'])).toBe('MIC1');
+    expect(firstFreeName(options, options)).toBe('MIC1');
+    expect(firstFreeName([], [])).toBe('');
   });
   it('accepts names from the list only', () => {
     expect(validateDeviceName('camera', 'CAM1')).toBeNull();
@@ -61,6 +69,10 @@ describe('senderReducer', () => {
 describe('classifyError', () => {
   it('maps API errors and media errors', () => {
     expect(classifyError({ code: 'DEVICE_LIMIT', status: 409 })).toBe('deviceLimit');
+    expect(classifyError({ code: 'DEVICE_NAME_IN_USE', status: 409 })).toBe('nameInUse');
+    expect(classifyError({ code: 'DEVICE_NAME_IN_USE_SELF', status: 409 })).toBe('nameInUseSelf');
+    expect(classifyError({ code: 'DEVICE_REPLACED', status: 409 })).toBe('replaced');
+    expect(classifyError({ code: 'CONFLICT', status: 409 })).toBe('network');
     expect(classifyError({ code: 'FORBIDDEN', status: 403 })).toBe('forbidden');
     expect(classifyError({ status: 401 })).toBe('forbidden');
     expect(classifyError({ name: 'NotAllowedError' })).toBe('permission');
@@ -89,6 +101,12 @@ describe('texts', () => {
     expect(errorText('busy', 'camera')).toContain('他のアプリが使用中');
     expect(errorText('forbidden', 'camera')).toContain('権限がありません');
     expect(errorText('network', 'camera')).toContain('回線を確認');
+  });
+  it('asks to pick another name instead of blaming the network (R3-01, R3-02)', () => {
+    expect(errorText('nameInUse', 'mic', 'MIC1')).toBe('MIC1 は他の端末が使用中です。別の端末名を選んでください。');
+    expect(errorText('nameInUse', 'camera')).toBe('この端末名 は他の端末が使用中です。別の端末名を選んでください。');
+    expect(errorText('nameInUseSelf', 'camera', 'CAM1')).toBe('CAM1 はあなたの別の端末で送信中です。この端末に切り替えると、もう一方の送信は停止します。');
+    expect(errorText('replaced', 'camera', 'CAM1')).toBe('サーバーから切断されたため、この端末の送信を停止しました。同じ端末名の別の端末に切り替えた場合は、そちらで送信を続けてください。');
   });
   it('labels each status', () => {
     expect(['idle', 'starting', 'live', 'reconnecting', 'error'].map((s) => statusText(s as SenderState['status']))).toEqual(['未接続', '接続中', '送信中', '再接続中', 'エラー']);

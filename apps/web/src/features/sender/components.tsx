@@ -1,12 +1,14 @@
 import { useEffect, useRef, type ReactNode } from 'react';
-import { CircleAlert, Radio } from 'lucide-react';
+import type { StagePurpose } from '@delivery/shared';
+import { ArrowRightLeft, CircleAlert, Radio } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
 import { Progress } from '@/components/ui/progress';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
-import { statusText, type SenderStatus } from './engine/session';
+import { errorText, statusText, type SenderErrorKind, type SenderStatus } from './engine/session';
 
 /** 接続状態。送信中だけアクセント色、エラーは destructive、それ以外は控えめな文字色。 */
 export function ConnectionStatus({ status, label }: { status: SenderStatus; label?: string | undefined }) {
@@ -56,12 +58,26 @@ export function VideoPreview({ stream, label }: { stream: MediaStream | null; la
   );
 }
 
-export function ErrorNotice({ children }: { children: ReactNode }) {
+export function ErrorNotice({ children, action }: { children: ReactNode; action?: ReactNode }) {
   return (
     <Alert variant="destructive">
       <CircleAlert aria-hidden />
-      <AlertDescription>{children}</AlertDescription>
+      <AlertDescription>
+        {children}
+        {action}
+      </AlertDescription>
     </Alert>
+  );
+}
+
+/** 送信エラーの表示。本人の別端末が同じ端末名を使っているときは「この端末に切り替える」を出す（R3-02）。 */
+export function SenderErrorNotice({ error, purpose, deviceName, onTakeover }: { error: SenderErrorKind; purpose: StagePurpose; deviceName?: string | undefined; onTakeover: () => void }) {
+  return (
+    <ErrorNotice action={error === 'nameInUseSelf' && (
+      <Button variant="outline" className="mt-2 h-11" onClick={onTakeover}><ArrowRightLeft aria-hidden />この端末に切り替える</Button>
+    )}>
+      {errorText(error, purpose, deviceName)}
+    </ErrorNotice>
   );
 }
 

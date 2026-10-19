@@ -16,6 +16,8 @@ export type ManagedSessionOptions = {
   onStatus?: (status: ManagedStatus) => void;
   /** 接続が失われ、受信中の参加者がいなくなったとき。 */
   onReset?: () => void;
+  /** サーバー側から切断されたとき（再接続せずに止まる。例: 同じ端末名の別端末に引き継がれた）。 */
+  onEnded?: (reason: string) => void;
   scheduler?: Scheduler;
 };
 
@@ -40,6 +42,15 @@ export function createManagedSession(options: ManagedSessionOptions) {
         options.onStatus?.('reconnecting');
         options.handlers?.onRecoverableLoss?.(reason);
         reconnector.trigger();
+      },
+      onEnded: (reason) => {
+        if (session !== next) return;
+        reconnector.stop();
+        drop();
+        options.onReset?.();
+        options.onStatus?.('idle');
+        options.handlers?.onEnded?.(reason);
+        options.onEnded?.(reason);
       },
     });
     session = next;

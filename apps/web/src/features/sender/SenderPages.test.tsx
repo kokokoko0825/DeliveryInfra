@@ -4,7 +4,7 @@ import { ApiError } from '@/lib/api';
 import { FakeMediaStream, FakeTrack, installMediaGlobals, stageMock, tokenResponse, type FakeSession } from '@/lib/ivs/testing';
 
 const sessions = vi.hoisted(() => [] as FakeSession[]);
-const api = vi.hoisted(() => ({ requestStageTokens: vi.fn(), sendHeartbeat: vi.fn(), releaseDevice: vi.fn() }));
+const api = vi.hoisted(() => ({ requestStageTokens: vi.fn(), sendHeartbeat: vi.fn(), releaseDevice: vi.fn(), fetchDeviceNamesInUse: vi.fn() }));
 vi.mock('@/lib/ivs/stage', () => stageMock(sessions));
 vi.mock('@/lib/ivs/mediaApi', async (importOriginal) => ({ ...(await importOriginal<typeof import('@/lib/ivs/mediaApi')>()), ...api }));
 
@@ -21,6 +21,7 @@ beforeEach(() => {
   api.requestStageTokens.mockReset().mockImplementation((purpose: string) => Promise.resolve(tokenResponse([purpose === 'slide' ? 'slide' : 'production'], 'dev-1')));
   api.sendHeartbeat.mockReset().mockResolvedValue({ expiresAt: '2026-10-19T00:00:00.000Z' });
   api.releaseDevice.mockReset().mockResolvedValue(undefined);
+  api.fetchDeviceNamesInUse.mockReset().mockResolvedValue({ inUse: [] });
   getUserMedia.mockReset().mockImplementation((constraints: MediaStreamConstraints) =>
     Promise.resolve(new FakeMediaStream([new FakeTrack(constraints.video ? 'video' : 'audio')])));
   getDisplayMedia.mockReset().mockImplementation(() => Promise.resolve(new FakeMediaStream([new FakeTrack('video'), new FakeTrack('audio')])));
@@ -36,7 +37,7 @@ describe('CameraSendPage (S-01)', () => {
     expect(screen.getByRole('status')).toHaveTextContent('未接続');
     fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('送信中'));
-    expect(api.requestStageTokens).toHaveBeenCalledWith('camera', 'CAM1');
+    expect(api.requestStageTokens).toHaveBeenCalledWith('camera', 'CAM1', false);
     expect(sessions[0]?.options.tracks).toHaveLength(1);
     expect(sessions[0]?.options.tracks[0]?.track.kind).toBe('video');
     expect(sessions[0]?.options.tracks[0]?.config).toEqual({ maxVideoBitrateKbps: 2000, maxFramerate: 30 });
@@ -63,6 +64,54 @@ describe('CameraSendPage (S-01)', () => {
     expect(screen.getByRole('status')).toHaveTextContent('エラー');
   });
 
+  it('stops a camera stream that arrives after a newer switch (R3-09)', async () => {
+    const pending: ((stream: FakeMediaStream) => void)[] = [];
+    getUserMedia.mockReset().mockImplementation(() => new Promise<FakeMediaStream>((resolve) => pending.push(resolve)));
+    render(<CameraSendPage />);
+    await waitFor(() => expect(getUserMedia).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('radio', { name: '前面' }));
+    await waitFor(() => expect(getUserMedia).toHaveBeenCalledTimes(2));
+    const stale = new FakeMediaStream([new FakeTrack('video')]);
+    const fresh = new FakeMediaStream([new FakeTrack('video')]);
+    // 後から出した要求が先に返り、古い要求が後から返る
+    await act(async () => pending[1]?.(fresh));
+    await act(async () => pending[0]?.(stale));
+    expect(stale.tracks[0]?.stop).toHaveBeenCalled();
+    expect(fresh.tracks[0]?.stop).not.toHaveBeenCalled();
+    expect((screen.getByLabelText('カメラのプレビュー') as HTMLVideoElement).srcObject).toBe(fresh);
+  });
+
+  it('stops a camera stream that arrives after leaving the page (R3-09)', async () => {
+    let resolve: (stream: FakeMediaStream) => void = () => undefined;
+    getUserMedia.mockReset().mockImplementation(() => new Promise<FakeMediaStream>((done) => { resolve = done; }));
+    const { unmount } = render(<CameraSendPage />);
+    await waitFor(() => expect(getUserMedia).toHaveBeenCalledTimes(1));
+    unmount();
+    const late = new FakeMediaStream([new FakeTrack('video')]);
+    await act(async () => resolve(late));
+    expect(late.tracks[0]?.stop).toHaveBeenCalled();
+  });
+
+  it('preselects a free device name (R3-01)', async () => {
+    api.fetchDeviceNamesInUse.mockResolvedValue({ inUse: ['CAM1', 'CAM2'] });
+    render(<CameraSendPage />);
+    await waitFor(() => expect(screen.getByRole('combobox', { name: '端末名' })).toHaveTextContent('CAM3'));
+    expect(api.fetchDeviceNamesInUse).toHaveBeenCalledWith('camera');
+    fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
+    await waitFor(() => expect(api.requestStageTokens).toHaveBeenCalledWith('camera', 'CAM3', false));
+  });
+
+  it('offers to take over the own device using the same name (R3-02)', async () => {
+    api.requestStageTokens.mockRejectedValueOnce(new ApiError(409, 'DEVICE_NAME_IN_USE_SELF', '使用中'));
+    render(<CameraSendPage />);
+    await waitFor(() => expect(getUserMedia).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('CAM1 はあなたの別の端末で送信中です');
+    fireEvent.click(screen.getByRole('button', { name: 'この端末に切り替える' }));
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('送信中'));
+    expect(api.requestStageTokens).toHaveBeenLastCalledWith('camera', 'CAM1', true);
+  });
+
   it('explains a denied camera permission', async () => {
     getUserMedia.mockRejectedValue(Object.assign(new Error('denied'), { name: 'NotAllowedError' }));
     render(<CameraSendPage />);
@@ -87,7 +136,7 @@ describe('MicSendPage (S-02)', () => {
     fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('送信中'));
     expect(getUserMedia.mock.calls[0]?.[0]).toMatchObject({ video: false, audio: { sampleRate: 48000 } });
-    expect(api.requestStageTokens).toHaveBeenCalledWith('mic', 'MIC1');
+    expect(api.requestStageTokens).toHaveBeenCalledWith('mic', 'MIC1', false);
     expect(sessions[0]?.options.tracks[0]?.config).toEqual({ maxAudioBitrateKbps: 64 });
     fireEvent.click(screen.getByRole('switch', { name: 'ミュート' }));
     expect(sessions[0]?.setMuted).toHaveBeenLastCalledWith('audio', true);
@@ -107,6 +156,23 @@ describe('MicSendPage (S-02)', () => {
     fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('マイクは最大5台まで接続できます');
   });
+
+  it('asks to pick another name when someone else uses it, not a network error (R3-01)', async () => {
+    api.requestStageTokens.mockRejectedValue(new ApiError(409, 'DEVICE_NAME_IN_USE', '使用中'));
+    render(<MicSendPage />);
+    fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('MIC1 は他の端末が使用中です。別の端末名を選んでください。');
+    expect(alert).not.toHaveTextContent('回線');
+    expect(screen.queryByRole('button', { name: 'この端末に切り替える' })).not.toBeInTheDocument();
+  });
+
+  it('keeps the first name when the in-use list cannot be fetched (R3-01)', async () => {
+    api.fetchDeviceNamesInUse.mockRejectedValue(new Error('offline'));
+    render(<MicSendPage />);
+    await waitFor(() => expect(api.fetchDeviceNamesInUse).toHaveBeenCalledWith('mic'));
+    expect(screen.getByRole('combobox', { name: '端末名' })).toHaveTextContent('MIC1');
+  });
 });
 
 describe('SlideSharePage (S-03)', () => {
@@ -119,7 +185,7 @@ describe('SlideSharePage (S-03)', () => {
     expect(getDisplayMedia.mock.calls[0]?.[0]).toMatchObject({ audio: expect.any(Object), systemAudio: 'include', video: { width: { max: 1280 }, height: { max: 720 } } });
     const stream = (await getDisplayMedia.mock.results[0]?.value) as FakeMediaStream;
     expect(stream.getVideoTracks()[0]?.contentHint).toBe('text');
-    expect(api.requestStageTokens).toHaveBeenCalledWith('slide', undefined);
+    expect(api.requestStageTokens).toHaveBeenCalledWith('slide', undefined, false);
     expect(sessions[0]?.token).toBe('tok-slide');
     expect(sessions[0]?.options.tracks.map((track) => track.config)).toEqual([{ maxVideoBitrateKbps: 2500, maxFramerate: 30 }, { maxAudioBitrateKbps: 128, stereo: true }]);
   });

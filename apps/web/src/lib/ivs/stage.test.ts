@@ -91,6 +91,19 @@ describe('createStageSession', () => {
     expect(handlers.onRecoverableLoss).toHaveBeenLastCalledWith('unknown');
   });
 
+  it('reports a server-side disconnect as ended, not as recoverable (R3-02)', () => {
+    const handlers = { onRecoverableLoss: vi.fn(), onEnded: vi.fn() };
+    createStageSession('tok', { publish: true, subscribe: false, tracks: [] }, handlers);
+    const stage = sdk.stages[0]!;
+    stage.emit('stageLeft', 'user-initiated');
+    expect(handlers.onEnded).not.toHaveBeenCalled();
+    stage.emit('stageLeft', 'participant-disconnected');
+    expect(handlers.onEnded).toHaveBeenCalledWith('participant-disconnected');
+    stage.emit('stageLeft', 'stage-deleted');
+    expect(handlers.onEnded).toHaveBeenLastCalledWith('stage-deleted');
+    expect(handlers.onRecoverableLoss).not.toHaveBeenCalled();
+  });
+
   it('works without handlers', () => {
     createStageSession('tok', { publish: true, subscribe: false, tracks: [] });
     const stage = sdk.stages[0]!;

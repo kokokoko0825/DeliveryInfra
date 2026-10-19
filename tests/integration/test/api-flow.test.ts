@@ -134,6 +134,16 @@ describe('ユーザー招待 → ロール変更 → ステージトークン(�
     deviceIds[1] = StageTokenResponseSchema.parse(reacquired.json).deviceId!;
     expect((await api('POST', '/tokens/stage', { token: camToken, body: { purpose: 'camera', deviceName: 'CAM7' } })).statusCode).toBe(409);
 
+    // 本人の同名端末は takeover を明示したときだけ置き換え、置き換えられた側のハートビートは DEVICE_REPLACED(R3-02)。
+    expect(errorCode(await api('POST', '/tokens/stage', { token: camToken, body: { purpose: 'camera', deviceName: 'CAM1' } }))).toBe('DEVICE_NAME_IN_USE_SELF');
+    const takenOver = await api('POST', '/tokens/stage', { token: camToken, body: { purpose: 'camera', deviceName: 'CAM1', takeover: true } });
+    expect(takenOver.statusCode).toBe(200);
+    const replacedId = deviceIds[0]!;
+    deviceIds[0] = StageTokenResponseSchema.parse(takenOver.json).deviceId!;
+    expect(deviceIds[0]).not.toBe(replacedId);
+    expect(errorCode(await api('POST', `/devices/${replacedId}/heartbeat`, { token: camToken, body: {} }))).toBe('DEVICE_REPLACED');
+    expect((await api('GET', '/devices/names?purpose=camera', { token: otherToken })).json).toEqual({ inUse: ['CAM1', 'CAM2', 'CAM3', 'CAM4', 'CAM5', 'CAM6'] });
+
     // 15秒ごとのハートビートで延長した枠は残り、止めた枠(CAM6)は45秒で失効して再取得できる。
     // 失効した端末の IVS 接続は切断してから枠を再利用する(R1-07)。
     const cam6Participant = world.ivs.tokens.find((token) => token.attributes?.deviceName === 'CAM6')!.participantId;

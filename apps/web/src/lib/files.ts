@@ -10,10 +10,13 @@ const pending = new Map<string, Promise<void>>();
 export const SLIDE_COOKIES_PATH = '/files/cookies';
 export const archiveCookiesPath = (archiveId: string) => `/archives/${encodeURIComponent(archiveId)}/cookies`;
 
-/** CloudFront 署名付き Cookie を必要なら取得する。path は発行 API（/api からの相対）。 */
-export function ensureFileCookies(path: string, now: () => number = Date.now): Promise<void> {
+/**
+ * CloudFront 署名付き Cookie を必要なら取得する。path は発行 API（/api からの相対）。
+ * force: 期限内でも取り直す（再生中に 403 になったときなど。R3-03）。取得中の要求があればそれを共有する。
+ */
+export function ensureFileCookies(path: string, now: () => number = Date.now, force = false): Promise<void> {
   const issued = issuedAt.get(path);
-  if (issued !== undefined && now() - issued < COOKIE_REFRESH_MS) return Promise.resolve();
+  if (!force && issued !== undefined && now() - issued < COOKIE_REFRESH_MS) return Promise.resolve();
   let request = pending.get(path);
   if (!request) {
     request = apiFetch(path, { method: 'POST', credentials: 'same-origin' })

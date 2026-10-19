@@ -60,7 +60,9 @@ export function switcherReducer(state: SwitcherState, action: SwitcherAction): S
     case 'TICK': {
       const { active } = state;
       if (!active || transitionProgress(active.startedAt, active.durationMs, action.now) < 1) return state;
-      return { ...state, program: active.to, preview: active.from, active: null };
+      // トランジション中にプレビューを選び直していたら、その選択を残す（R3-06）
+      const previewChanged = state.preview !== active.to;
+      return { ...state, program: active.to, preview: previewChanged ? state.preview : active.from, active: null };
     }
   }
 }

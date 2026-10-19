@@ -28,13 +28,13 @@ const NOW_S = NOW_MS / 1000;
 const UUID = '0b6c2a52-1111-4222-8333-444455556666';
 
 type RoleName = 'admin' | 'camera' | 'audio' | 'presenter' | 'viewer';
-const makeEvent = (method: string, path: string, body?: unknown): FunctionUrlEvent => ({
-  rawPath: `/api${path}`, headers: { 'X-Auth-Token': 'access-token', 'x-forwarded-host': 'example.cloudfront.net' },
+const makeEvent = (method: string, path: string, body?: unknown, rawQueryString?: string): FunctionUrlEvent => ({
+  rawPath: `/api${path}`, ...(rawQueryString === undefined ? {} : { rawQueryString }), headers: { 'X-Auth-Token': 'access-token', 'x-forwarded-host': 'example.cloudfront.net' },
   requestContext: { http: { method, path: `/api${path}` } },
   ...(body === undefined ? {} : { body: JSON.stringify(body) }),
 });
-const request = (role: RoleName, method: string, path: string, body?: unknown, userId = 'user-1') =>
-  createApiHandler({ env, clients, authenticate: vi.fn().mockResolvedValue({ userId, username: `${userId}-name`, role }), now: () => NOW_MS })(makeEvent(method, path, body));
+const request = (role: RoleName, method: string, path: string, body?: unknown, userId = 'user-1', rawQueryString?: string) =>
+  createApiHandler({ env, clients, authenticate: vi.fn().mockResolvedValue({ userId, username: `${userId}-name`, role }), now: () => NOW_MS })(makeEvent(method, path, body, rawQueryString));
 const awsError = (name: string) => Object.assign(new Error(name), { name });
 const conditionalError = () => awsError('ConditionalCheckFailedException');
 interface Payload { error?: { code: string; message: string }; [key: string]: unknown }
@@ -222,16 +222,62 @@ describe('stage tokens and device slots', () => {
     expect(ddb.commandCalls(PutCommand)).toHaveLength(0);
   });
 
-  it('ignores an expired duplicate name and lets the same user take over their own slot (R1-18)', async () => {
+  it('ignores an expired duplicate name and lets the same user take over their own slot only when asked (R1-18, R3-02)', async () => {
     ddb.on(QueryCommand).resolves({ Items: [lease('camera#2', { userId: 'other', deviceName: 'CAM1', ttl: NOW_S })] });
     expect((await request('camera', 'POST', '/tokens/stage', { purpose: 'camera', deviceName: 'CAM1' })).statusCode).toBe(200);
     expect(ddb.commandCalls(PutCommand)[0]?.args[0].input.Item?.SK).toBe('camera#1');
+    expect(ddb.commandCalls(PutCommand)[0]?.args[0].input.Item).not.toHaveProperty('replacedDeviceId');
 
     ddb.on(QueryCommand).resolves({ Items: [lease('camera#2', { deviceName: 'CAM1', participantId: 'old', stageArn: 'prod' })] });
     ddb.on(PutCommand).resolves({ Attributes: lease('camera#2', { deviceName: 'CAM1', participantId: 'old', stageArn: 'prod' }) });
-    expect((await request('camera', 'POST', '/tokens/stage', { purpose: 'camera', deviceName: 'CAM1' })).statusCode).toBe(200);
-    expect(ddb.commandCalls(PutCommand).at(-1)?.args[0].input).toMatchObject({ Item: { SK: 'camera#2' }, ConditionExpression: 'deviceId = :previous', ExpressionAttributeValues: { ':previous': `camera.2.${UUID}` } });
-    expect(ivs.commandCalls(DisconnectParticipantCommand).at(-1)?.args[0].input).toEqual({ stageArn: 'prod', participantId: 'old', reason: '同じ端末名で再接続されました' });
+    // 明示しない同名の取得は、本人の別端末を切断せずに拒否する（相互切断ループの防止）
+    const implicit = await request('camera', 'POST', '/tokens/stage', { purpose: 'camera', deviceName: 'CAM1' });
+    expect(implicit.statusCode).toBe(409);
+    expect(data(implicit).error).toEqual({ code: 'DEVICE_NAME_IN_USE_SELF', message: 'この端末名はあなたの別の端末で使用中です' });
+    expect(ddb.commandCalls(PutCommand)).toHaveLength(1);
+    expect(ivs.commandCalls(DisconnectParticipantCommand)).toHaveLength(0);
+
+    expect((await request('camera', 'POST', '/tokens/stage', { purpose: 'camera', deviceName: 'CAM1', takeover: true })).statusCode).toBe(200);
+    expect(ddb.commandCalls(PutCommand).at(-1)?.args[0].input).toMatchObject({ Item: { SK: 'camera#2', replacedDeviceId: `camera.2.${UUID}` }, ConditionExpression: 'deviceId = :previous', ExpressionAttributeValues: { ':previous': `camera.2.${UUID}` } });
+    expect(ivs.commandCalls(DisconnectParticipantCommand).at(-1)?.args[0].input).toEqual({ stageArn: 'prod', participantId: 'old', reason: '同じ端末名の別の端末に引き継がれました' });
+  });
+
+  it('still rejects another user\'s name even with takeover (R3-02)', async () => {
+    ddb.on(QueryCommand).resolves({ Items: [lease('camera#2', { userId: 'other', deviceName: 'CAM1' })] });
+    const response = await request('camera', 'POST', '/tokens/stage', { purpose: 'camera', deviceName: 'CAM1', takeover: true });
+    expect(data(response).error?.code).toBe('DEVICE_NAME_IN_USE');
+    expect(ddb.commandCalls(PutCommand)).toHaveLength(0);
+  });
+
+  it('tells a replaced device apart from an expired one on heartbeat (R3-02)', async () => {
+    const oldId = `camera.1.${UUID}`;
+    const newId = `camera.1.${UUID.replace('0b6c', '1111')}`;
+    ddb.on(GetCommand, { Key: { PK: 'DEVICE', SK: 'camera#1' } }).resolves({ Item: lease('camera#1', { deviceId: newId, replacedDeviceId: oldId }) });
+    const replaced = await request('camera', 'POST', `/devices/${oldId}/heartbeat`);
+    expect(replaced.statusCode).toBe(409);
+    expect(data(replaced).error).toEqual({ code: 'DEVICE_REPLACED', message: '同じ端末名の別の端末に引き継がれました' });
+    expect((await request('camera', 'POST', `/devices/${oldId}/heartbeat`, undefined, 'other')).statusCode).toBe(404);
+    // 別の端末 ID の失効（引き継ぎ元が自分でない）は従来どおり 404
+    expect((await request('camera', 'POST', `/devices/camera.1.${UUID.replace('0b6c', '2222')}/heartbeat`)).statusCode).toBe(404);
+    // 引き継いだ側も失効していれば 404（再接続の対象）
+    ddb.on(GetCommand, { Key: { PK: 'DEVICE', SK: 'camera#1' } }).resolves({ Item: lease('camera#1', { deviceId: newId, replacedDeviceId: oldId, ttl: NOW_S }) });
+    expect((await request('camera', 'POST', `/devices/${oldId}/heartbeat`)).statusCode).toBe(404);
+    ddb.on(GetCommand, { Key: { PK: 'DEVICE', SK: 'camera#1' } }).resolves({});
+    expect((await request('camera', 'POST', `/devices/${oldId}/heartbeat`)).statusCode).toBe(404);
+  });
+
+  it('lists device names used by other users so the client can preselect a free one (R3-01)', async () => {
+    ddb.on(QueryCommand).resolves({ Items: [
+      lease('camera#1', { userId: 'other', deviceName: 'CAM1' }),
+      lease('camera#2', { deviceName: 'CAM2' }),
+      lease('camera#3', { userId: 'other', deviceName: 'CAM3', ttl: NOW_S }),
+    ] });
+    const response = await request('camera', 'GET', '/devices/names', undefined, 'user-1', 'purpose=camera');
+    expect(data(response)).toEqual({ inUse: ['CAM1'] });
+    expect(ddb.commandCalls(QueryCommand)[0]?.args[0].input).toMatchObject({ ConsistentRead: true, ExpressionAttributeValues: { ':pk': 'DEVICE', ':sk': 'camera#' } });
+    expect((await request('viewer', 'GET', '/devices/names', undefined, 'user-1', 'purpose=camera')).statusCode).toBe(403);
+    expect((await request('camera', 'GET', '/devices/names', undefined, 'user-1', 'purpose=slide')).statusCode).toBe(400);
+    expect((await request('camera', 'GET', '/devices/names')).statusCode).toBe(400);
   });
 
   it('lists active devices with a single partition query', async () => {
@@ -315,6 +361,22 @@ describe('API router endpoint behavior', () => {
     ivs.on(StartCompositionCommand).rejects(new Error('stage unavailable'));
     const failed = await request('admin', 'POST', '/broadcast/start', { title: '大会' });
     expect(failed.statusCode).toBe(500);
+    expect(ddb.commandCalls(DeleteCommand)).toHaveLength(1);
+    expect(ivs.commandCalls(StopCompositionCommand)).toHaveLength(0);
+  });
+
+  it('stops the started composition when saving the live state fails (R3-11)', async () => {
+    ddb.on(UpdateCommand).rejects(awsError('ProvisionedThroughputExceededException'));
+    const failed = await request('admin', 'POST', '/broadcast/start', { title: '大会' });
+    expect(failed.statusCode).toBe(500);
+    expect(ivs.commandCalls(StopCompositionCommand).map((call) => call.args[0].input)).toEqual([{ arn: 'composition-arn' }]);
+    expect(ddb.commandCalls(DeleteCommand)).toHaveLength(1);
+    expect(chat.commandCalls(SendEventCommand)).toHaveLength(0);
+    // 補償の StopComposition が失敗しても元のエラーで応答し、行は消す
+    ddb.reset(); ddb.on(PutCommand).resolves({}); ddb.on(DeleteCommand).resolves({});
+    ddb.on(UpdateCommand).rejects(awsError('ProvisionedThroughputExceededException'));
+    ivs.on(StopCompositionCommand).rejects(awsError('ThrottlingException'));
+    expect((await request('admin', 'POST', '/broadcast/start', { title: '大会' })).statusCode).toBe(500);
     expect(ddb.commandCalls(DeleteCommand)).toHaveLength(1);
   });
 

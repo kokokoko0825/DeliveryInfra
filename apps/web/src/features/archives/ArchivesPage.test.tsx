@@ -5,11 +5,11 @@ import { apiError, bodyOf, callsTo, makeAuth, makeMe, mockApi, renderPage } from
 import { resetFileCookies } from '@/lib/files';
 
 const hls = vi.hoisted(() => {
-  const instances: { loadSource: ReturnType<typeof vi.fn>; attachMedia: ReturnType<typeof vi.fn>; destroy: ReturnType<typeof vi.fn>; on: ReturnType<typeof vi.fn>; config: unknown }[] = [];
+  const instances: { loadSource: ReturnType<typeof vi.fn>; attachMedia: ReturnType<typeof vi.fn>; destroy: ReturnType<typeof vi.fn>; on: ReturnType<typeof vi.fn>; startLoad: ReturnType<typeof vi.fn>; config: unknown }[] = [];
   const Hls = Object.assign(vi.fn(function (this: Record<string, unknown>, config: unknown) {
-    Object.assign(this, { loadSource: vi.fn(), attachMedia: vi.fn(), destroy: vi.fn(), on: vi.fn(), config });
+    Object.assign(this, { loadSource: vi.fn(), attachMedia: vi.fn(), destroy: vi.fn(), on: vi.fn(), startLoad: vi.fn(), config });
     instances.push(this as never);
-  }), { isSupported: vi.fn(() => true), Events: { ERROR: 'hlsError' } });
+  }), { isSupported: vi.fn(() => true), Events: { ERROR: 'hlsError', FRAG_LOADED: 'hlsFragLoaded' }, ErrorTypes: { NETWORK_ERROR: 'networkError', MEDIA_ERROR: 'mediaError' } });
   return { Hls, instances };
 });
 vi.mock('hls.js', () => ({ default: hls.Hls }));
@@ -127,6 +127,21 @@ describe('ArchiveDetailPage (U-04)', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     onError(null, { fatal: true });
     expect(await screen.findByRole('alert')).toHaveTextContent('再生中にエラーが発生しました');
+  });
+
+  it('re-issues this archive\'s cookies and resumes when a segment returns 403 (R3-03)', async () => {
+    const fetchMock = mockApi({ 'GET /api/archives': [archive('a1')], 'POST /api/archives/a1/cookies': {} });
+    HTMLMediaElement.prototype.canPlayType = vi.fn((): CanPlayTypeResult => '');
+    openDetail();
+    await waitFor(() => expect(hls.instances).toHaveLength(1));
+    expect(callsTo(fetchMock, 'POST /api/archives/a1/cookies')).toHaveLength(1);
+    const instance = hls.instances[0]!;
+    const onError = instance.on.mock.calls.find(([event]) => event === 'hlsError')?.[1] as (e: unknown, d: unknown) => void;
+    // 発行から50分以内でも、403 なら取り直す
+    onError(null, { fatal: true, type: 'networkError', response: { url: 'seg.ts', code: 403 } });
+    await waitFor(() => expect(callsTo(fetchMock, 'POST /api/archives/a1/cookies')).toHaveLength(2));
+    await waitFor(() => expect(instance.startLoad).toHaveBeenCalled());
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
   it('uses native HLS on Safari', async () => {

@@ -3,10 +3,11 @@ import { Camera, Square, SwitchCamera } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
-import { ConnectionStatus, DeviceNameSelect, ErrorNotice, SenderShell, VideoPreview } from './components';
-import { deviceNameOptions, validateDeviceName } from './engine/deviceName';
+import { ConnectionStatus, DeviceNameSelect, ErrorNotice, SenderErrorNotice, SenderShell, VideoPreview } from './components';
+import { validateDeviceName } from './engine/deviceName';
 import { CAMERA_PUBLISH, cameraConstraints, toPublishTracks, type Facing } from './engine/media';
-import { canStart, classifyError, errorText, isActive, type SenderErrorKind } from './engine/session';
+import { canStart, classifyError, isActive, type SenderErrorKind } from './engine/session';
+import { useDeviceName } from './useDeviceName';
 import { useStageSender } from './useStageSender';
 
 const stopStream = (stream: MediaStream | null) => stream?.getTracks().forEach((track) => track.stop());
@@ -14,30 +15,37 @@ const stopStream = (stream: MediaStream | null) => stream?.getTracks().forEach((
 export default function CameraSendPage() {
   const sender = useStageSender('camera');
   const { updateTracks } = sender;
-  const options = deviceNameOptions('camera');
-  const [deviceName, setDeviceName] = useState(options[0] ?? '');
+  const { options, deviceName, setDeviceName } = useDeviceName('camera');
   const [facing, setFacing] = useState<Facing>('environment');
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [mediaError, setMediaError] = useState<SenderErrorKind | null>(null);
   const current = useRef<MediaStream | null>(null);
+  /** 最新の getUserMedia 要求の番号。古い要求の結果は使わずに止める（R3-09） */
+  const request = useRef(0);
   const active = isActive(sender.state.status);
   const activeRef = useRef(active);
   activeRef.current = active;
 
   const openCamera = useCallback(async (nextFacing: Facing) => {
+    const id = ++request.current;
     // iOS は同時に2つのカメラを開けないため、先に止める
     stopStream(current.current);
     current.current = null;
     setStream(null);
     try {
       const next = await navigator.mediaDevices.getUserMedia(cameraConstraints(nextFacing));
+      // 取得中に前面/背面が切り替わった・画面を離れた場合は、この結果を捨てて必ず止める
+      if (id !== request.current) {
+        stopStream(next);
+        return null;
+      }
       current.current = next;
       setStream(next);
       setMediaError(null);
       if (activeRef.current) updateTracks(toPublishTracks(next.getVideoTracks(), CAMERA_PUBLISH, undefined));
       return next;
     } catch (error) {
-      setMediaError(classifyError(error));
+      if (id === request.current) setMediaError(classifyError(error));
       return null;
     }
   }, [updateTracks]);
@@ -45,13 +53,16 @@ export default function CameraSendPage() {
   useEffect(() => {
     void openCamera(facing);
   }, [facing, openCamera]);
-  useEffect(() => () => stopStream(current.current), []);
+  useEffect(() => () => {
+    request.current += 1;
+    stopStream(current.current);
+  }, []);
 
   const nameError = validateDeviceName('camera', deviceName);
-  const start = async () => {
+  const start = async (takeover = false) => {
     const media = current.current ?? await openCamera(facing);
     if (!media || nameError) return;
-    await sender.start(toPublishTracks(media.getVideoTracks(), CAMERA_PUBLISH, undefined), deviceName);
+    await sender.start(toPublishTracks(media.getVideoTracks(), CAMERA_PUBLISH, undefined), deviceName, false, takeover);
   };
   const error = sender.state.error ?? mediaError;
 
@@ -69,7 +80,7 @@ export default function CameraSendPage() {
         </div>
       </div>
       {nameError && <ErrorNotice>{nameError}</ErrorNotice>}
-      {error && <ErrorNotice>{errorText(error, 'camera')}</ErrorNotice>}
+      {error && <SenderErrorNotice error={error} purpose="camera" deviceName={deviceName} onTakeover={() => void start(true)} />}
       {canStart(sender.state.status) || sender.state.status === 'starting' ? (
         <Button className="h-11 w-full" onClick={() => void start()} disabled={!canStart(sender.state.status) || Boolean(nameError)}>
           <Camera aria-hidden />送信開始

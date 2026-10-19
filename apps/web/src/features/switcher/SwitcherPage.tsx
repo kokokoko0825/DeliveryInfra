@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 import { CircleAlert, Keyboard, Power } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription } from '@/components/ui/alert';
@@ -12,7 +12,7 @@ import { MultiView, buildTiles } from './components/MultiView';
 import { PreflightPanel } from './components/PreflightPanel';
 import { PROGRAM_SIZE } from './engine/layout';
 import { SLIDE, STANDBY, cameraSource, type SourceId } from './engine/scene';
-import { SHORTCUT_HELP, keyToAction, shouldIgnoreKey } from './engine/shortcuts';
+import { INTERACTIVE_SELECTOR, SHORTCUT_HELP, keyToAction, shouldIgnoreKey } from './engine/shortcuts';
 import { cameraSlots, slideAlert } from './engine/sources';
 import { onAirSources } from './engine/state';
 import { createDefaultStandby, loadStandbyImage } from './media/compositor';
@@ -29,10 +29,14 @@ function useSlideAlert(health: ReturnType<typeof useSwitcher>['health']) {
   return state.alert;
 }
 
+/** コメント欄（最大100件）は重いので、スイッチング操作による再描画から切り離す（R3-10）。 */
+const SwitcherComments = memo(function SwitcherComments() {
+  return <CommentPanel className="h-[28rem]" moderation={useAdminModeration()} />;
+});
+
 export default function SwitcherPage() {
   const controller = useSwitcher();
   const { switcher, dispatch, routed, health, running, setStandbyImage } = controller;
-  const moderation = useAdminModeration();
   const [standbyUrl, setStandbyUrl] = useState<string | null>(null);
   const [standbyError, setStandbyError] = useState<string | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
@@ -44,7 +48,8 @@ export default function SwitcherPage() {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      const target = event.target instanceof HTMLElement ? { tagName: event.target.tagName, isContentEditable: event.target.isContentEditable, role: event.target.getAttribute('role') } : null;
+      const element = event.target instanceof HTMLElement ? (event.target.closest<HTMLElement>(INTERACTIVE_SELECTOR) ?? event.target) : null;
+      const target = element ? { tagName: element.tagName, isContentEditable: element.isContentEditable, role: element.getAttribute('role') } : null;
       if (shouldIgnoreKey(event.key, target, { ctrl: event.ctrlKey, meta: event.metaKey, alt: event.altKey })) return;
       const action = keyToAction(event.key, slots);
       if (!action) return;
@@ -116,11 +121,11 @@ export default function SwitcherPage() {
         <aside className="space-y-4">
           <BroadcastPanel running={running} publishing={controller.publishing} bitrate={controller.bitrate}
             startPublishing={controller.startPublishing} stopPublishing={controller.stopPublishing} />
-          <MixerPanel state={controller.mixer} dispatch={controller.mixerDispatch} micNames={routed.micNames} connected={new Set(routed.audio.keys())} levels={controller.levels} />
+          <MixerPanel state={controller.mixer} dispatch={controller.mixerDispatch} micNames={routed.micNames} connected={new Set(routed.audio.keys())} readLevels={controller.readLevels} running={running} />
           <PipPanel state={switcher} dispatch={dispatch} sources={sources} />
           <StandbyPanel custom={standbyUrl !== null} error={standbyError} onFile={(file) => void chooseStandby(file)} onReset={resetStandby} />
           <PreflightPanel />
-          <CommentPanel className="h-[28rem]" moderation={moderation} />
+          <SwitcherComments />
         </aside>
       </div>
     </div>

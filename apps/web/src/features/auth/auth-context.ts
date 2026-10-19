@@ -9,6 +9,8 @@ export type AuthContextValue = {
   me: MeResponse | null;
   config: RuntimeConfig | null;
   error: string | null;
+  /** Okta（リダイレクト）ログインの失敗理由。ログイン画面に表示する（R3-08） */
+  loginError: string | null;
   /** ログイン直後・表示名変更後などにプロフィールを再取得する */
   refresh: () => Promise<MeResponse | null>;
   setMe: (me: MeResponse) => void;

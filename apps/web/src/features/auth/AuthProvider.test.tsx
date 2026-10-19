@@ -5,29 +5,32 @@ import { useAuth } from './auth-context';
 
 const mocks = vi.hoisted(() => ({
   configureAuth: vi.fn(), getAccessToken: vi.fn(), logout: vi.fn(), loadRuntimeConfig: vi.fn(),
-  hubListeners: [] as ((data: { payload: { event: string } }) => void)[],
+  hubListeners: [] as ((data: { payload: { event: string; data?: unknown } }) => void)[],
 }));
-vi.mock('@/lib/auth', () => ({ configureAuth: mocks.configureAuth, getAccessToken: mocks.getAccessToken, logout: mocks.logout }));
+vi.mock('@/lib/auth', async (importOriginal) => ({
+  redirectErrorMessage: (await importOriginal<typeof import('@/lib/auth')>()).redirectErrorMessage,
+  configureAuth: mocks.configureAuth, getAccessToken: mocks.getAccessToken, logout: mocks.logout,
+}));
 vi.mock('@/lib/config', () => ({ loadRuntimeConfig: mocks.loadRuntimeConfig }));
 vi.mock('aws-amplify/utils', () => ({
-  Hub: { listen: (_channel: string, listener: (data: { payload: { event: string } }) => void) => { mocks.hubListeners.push(listener); return () => undefined; } },
+  Hub: { listen: (_channel: string, listener: (data: { payload: { event: string; data?: unknown } }) => void) => { mocks.hubListeners.push(listener); return () => undefined; } },
 }));
 const { AuthProvider } = await import('./AuthProvider');
 const { apiFetch } = await import('@/lib/api');
 
 const config = { region: 'ap-northeast-1', userPoolId: 'pool', userPoolClientId: 'client' };
 function Probe() {
-  const { status, me, error, logout, refresh } = useAuth();
+  const { status, me, error, loginError, logout, refresh } = useAuth();
   return (
     <div>
-      <p>status:{status}</p><p>name:{me?.displayName ?? '-'}</p><p>error:{error ?? '-'}</p>
+      <p>status:{status}</p><p>name:{me?.displayName ?? '-'}</p><p>error:{error ?? '-'}</p><p>loginError:{loginError ?? '-'}</p>
       <button onClick={() => { void logout(); }}>logout</button>
       <button onClick={() => { void refresh(); }}>refresh</button>
     </div>
   );
 }
 const renderProvider = () => render(<AuthProvider><Probe /></AuthProvider>);
-const hub = (event: string) => act(() => mocks.hubListeners.forEach((listener) => listener({ payload: { event } })));
+const hub = (event: string, data?: unknown) => act(() => mocks.hubListeners.forEach((listener) => listener({ payload: { event, data } })));
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -99,6 +102,22 @@ describe('AuthProvider', () => {
     expect(await screen.findByText('status:signedOut')).toBeInTheDocument();
     hub('other');
     expect(screen.getByText('status:signedOut')).toBeInTheDocument();
+  });
+
+  it('keeps the Okta sign-in failure reason and clears it on success (R3-08)', async () => {
+    mocks.getAccessToken.mockResolvedValueOnce(undefined);
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => new Response(JSON.stringify(makeMe()))));
+    renderProvider();
+    await screen.findByText('status:signedOut');
+    expect(screen.getByText('loginError:-')).toBeInTheDocument();
+    hub('signInWithRedirect_failure', { error: Object.assign(new Error('access_denied: User is not assigned to the client application.'), { name: 'OAuthSignInException' }) });
+    expect(screen.getByText('loginError:Okta でこのアプリの利用が許可されていません。管理者にアプリの割り当てを確認してください')).toBeInTheDocument();
+    expect(screen.getByText('status:signedOut')).toBeInTheDocument();
+    hub('signInWithRedirect');
+    expect(await screen.findByText('status:signedIn')).toBeInTheDocument();
+    expect(screen.getByText('loginError:-')).toBeInTheDocument();
+    hub('signInWithRedirect_failure');
+    expect(screen.getByText('loginError:Okta でログインできませんでした。時間をおいて再度お試しください')).toBeInTheDocument();
   });
 
   it('registers the token provider and the unauthorized handler for apiFetch', async () => {

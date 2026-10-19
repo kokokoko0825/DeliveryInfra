@@ -1,15 +1,20 @@
 /** 送信・スイッチングで使う API 呼び出し（契約は @delivery/shared の zod）。 */
 import {
-  BroadcastResponseSchema, BroadcastSchema, BroadcastStartRequestSchema, HeartbeatResponseSchema, StageTokenRequestSchema,
+  BroadcastResponseSchema, BroadcastSchema, BroadcastStartRequestSchema, DeviceNamesResponseSchema, HeartbeatResponseSchema, StageTokenRequestSchema,
   StageTokenResponseSchema, StatusResponseSchema, ViewerCountResponseSchema,
   type StageName, type StagePurpose, type StageTokenResponse,
 } from '@delivery/shared';
 import { apiFetch } from '@/lib/api';
 
-export function requestStageTokens(purpose: StagePurpose, deviceName?: string): Promise<StageTokenResponse> {
-  const body = StageTokenRequestSchema.parse(deviceName === undefined ? { purpose } : { purpose, deviceName });
+/** takeover は本人の別端末が同じ端末名で送信中のときに明示的に引き継ぐ場合だけ true にする（R3-02）。 */
+export function requestStageTokens(purpose: StagePurpose, deviceName?: string, takeover = false): Promise<StageTokenResponse> {
+  const body = StageTokenRequestSchema.parse({ purpose, ...(deviceName === undefined ? {} : { deviceName }), ...(takeover ? { takeover } : {}) });
   return apiFetch('/tokens/stage', { method: 'POST', body, schema: StageTokenResponseSchema });
 }
+
+/** 他のユーザーが使用中の端末名（R3-01）。 */
+export const fetchDeviceNamesInUse = (purpose: 'camera' | 'mic') =>
+  apiFetch(`/devices/names?purpose=${purpose}`, { schema: DeviceNamesResponseSchema });
 
 /** 応答から指定ステージのトークンを取り出す（配列順には依存しない）。 */
 export function tokenFor(response: StageTokenResponse, stage: StageName): string {

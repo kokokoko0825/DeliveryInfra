@@ -5,6 +5,16 @@ import { Slider } from '@/components/ui/slider';
 
 type FullscreenVideo = HTMLVideoElement & { webkitEnterFullscreen?: () => void };
 
+/**
+ * 音量を変更できるか。iOS Safari の volume は読み取り専用で常に 1 のため、書いて読み戻して判定する（R3-07）。
+ * 例: iPhone → false（音量スライダーを出さず、ミュート操作と本体の音量ボタンで調整）
+ */
+export function canSetVolume(): boolean {
+  const probe = document.createElement('video');
+  probe.volume = 0.5;
+  return probe.volume === 0.5;
+}
+
 /** 受信したステージ映像の再生。自動再生制限のため最初はミュートで再生し、タップで音声をオンにする。 */
 export function VideoPlayer({ stream }: { stream: MediaStream | null }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -13,6 +23,7 @@ export function VideoPlayer({ stream }: { stream: MediaStream | null }) {
   const [unlocked, setUnlocked] = useState(false);
   const [volume, setVolume] = useState(100);
   const [fullscreen, setFullscreen] = useState(false);
+  const [volumeAdjustable] = useState(canSetVolume);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -61,8 +72,10 @@ export function VideoPlayer({ stream }: { stream: MediaStream | null }) {
           onClick={() => { setUnlocked(true); setMuted((value) => !value); }}>
           {muted ? <VolumeX aria-hidden /> : <Volume2 aria-hidden />}
         </Button>
-        <Slider className="w-32" aria-label="音量" min={0} max={100} step={1} value={[volume]}
-          onValueChange={([value = 0]) => { setVolume(value); if (value > 0) { setUnlocked(true); setMuted(false); } }} />
+        {volumeAdjustable && (
+          <Slider className="w-32" aria-label="音量" min={0} max={100} step={1} value={[volume]}
+            onValueChange={([value = 0]) => { setVolume(value); if (value > 0) { setUnlocked(true); setMuted(false); } }} />
+        )}
         <span className="ml-auto" />
         <Button variant="ghost" size="icon" className="size-11" aria-label={fullscreen ? '全画面を終了' : '全画面表示'} onClick={toggleFullscreen}>
           {fullscreen ? <Minimize aria-hidden /> : <Maximize aria-hidden />}

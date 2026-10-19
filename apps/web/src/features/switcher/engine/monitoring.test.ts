@@ -5,8 +5,8 @@ import {
 } from './mixer';
 import { remoteReducer, routeMedia, type RemoteState } from './remote';
 import { SLIDE, STANDBY, cameraSource } from './scene';
-import { SHORTCUT_HELP, keyToAction, shouldIgnoreKey } from './shortcuts';
-import { HEALTH_LABEL, MAX_CAMERAS, STALL_THRESHOLD_MS, cameraSlots, healthOf, orderDevices, slideAlert } from './sources';
+import { INTERACTIVE_SELECTOR, SHORTCUT_HELP, keyToAction, shouldIgnoreKey } from './shortcuts';
+import { HEALTH_LABEL, MAX_CAMERAS, STALL_THRESHOLD_MS, cameraSlots, healthOf, orderDevices, sameHealth, slideAlert } from './sources';
 
 describe('mixer', () => {
   const MIC1 = micChannel('MIC1');
@@ -48,6 +48,15 @@ describe('mixer', () => {
 });
 
 describe('sources', () => {
+  it('compares health maps by content (R3-10)', () => {
+    const a = new Map([['camera:CAM1', 'live'], ['slide', 'stalled']] as const);
+    expect(sameHealth(a, new Map(a))).toBe(true);
+    expect(sameHealth(new Map(), new Map())).toBe(true);
+    expect(sameHealth(a, new Map([['camera:CAM1', 'live']]))).toBe(false);
+    expect(sameHealth(new Map([['camera:CAM1', 'live']]), a)).toBe(false);
+    expect(sameHealth(a, new Map([['camera:CAM1', 'live'], ['slide', 'live']]))).toBe(false);
+    expect(sameHealth(a, new Map([['camera:CAM2', 'live'], ['slide', 'stalled']]))).toBe(false);
+  });
   it('health: disconnected / stalled / live with a 2s threshold', () => {
     expect(STALL_THRESHOLD_MS).toBe(2000);
     expect(healthOf({ connected: false, lastFrameAt: 1000 }, 1000)).toBe('disconnected');
@@ -155,6 +164,7 @@ describe('shortcuts', () => {
   });
   it('ignores keys in inputs, with modifiers, and Space/Enter on buttons', () => {
     const none = { ctrl: false, meta: false, alt: false };
+    expect(INTERACTIVE_SELECTOR.split(',')).toEqual(expect.arrayContaining(['summary', 'button', 'a', 'input', '[role="button"]', '[role="slider"]', '[contenteditable="true"]']));
     expect(shouldIgnoreKey('1', null, none)).toBe(false);
     expect(shouldIgnoreKey('1', null, { ...none, ctrl: true })).toBe(true);
     expect(shouldIgnoreKey('1', null, { ...none, meta: true })).toBe(true);
@@ -168,6 +178,11 @@ describe('shortcuts', () => {
     expect(shouldIgnoreKey('1', { tagName: 'BUTTON' }, none)).toBe(false);
     expect(shouldIgnoreKey(' ', { tagName: 'BUTTON' }, none)).toBe(true);
     expect(shouldIgnoreKey('Enter', { tagName: 'a' }, none)).toBe(true);
+    // details の summary 上の Enter/Space は開閉に使う（R3-05）
+    expect(shouldIgnoreKey('Enter', { tagName: 'SUMMARY' }, none)).toBe(true);
+    expect(shouldIgnoreKey(' ', { tagName: 'summary' }, none)).toBe(true);
+    expect(shouldIgnoreKey('1', { tagName: 'SUMMARY' }, none)).toBe(false);
+    expect(shouldIgnoreKey('Enter', { tagName: 'SPAN', role: 'link' }, none)).toBe(true);
     expect(shouldIgnoreKey('Enter', { tagName: 'DIV', role: 'switch' }, none)).toBe(true);
     expect(shouldIgnoreKey(' ', { tagName: 'DIV' }, none)).toBe(false);
     expect(shouldIgnoreKey(' ', { role: null }, none)).toBe(false);

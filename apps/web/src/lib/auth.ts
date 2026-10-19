@@ -60,6 +60,17 @@ export async function getAccessToken(forceRefresh = false): Promise<string | und
   }
 }
 
+/**
+ * Okta（Hosted UI のリダイレクト）ログイン失敗の理由を日本語にする（R3-08）。
+ * 例: Okta でアプリが割り当てられていない → access_denied、PostConfirmation の失敗 → "PostConfirmation failed ..."。
+ */
+export function redirectErrorMessage(error: unknown): string {
+  const text = error instanceof Error ? `${error.name} ${error.message}` : typeof error === 'string' ? error : '';
+  if (/access_denied|not assigned|unauthorized/i.test(text)) return 'Okta でこのアプリの利用が許可されていません。管理者にアプリの割り当てを確認してください';
+  if (/PostConfirmation|PreSignUp|PreAuthentication|PostAuthentication/i.test(text)) return 'アカウントの初期設定に失敗しました。時間をおいて再度お試しいただき、解決しない場合は管理者に連絡してください';
+  return 'Okta でログインできませんでした。時間をおいて再度お試しください';
+}
+
 /** Amplify(Cognito) のエラーを日本語にする。 */
 export function authErrorMessage(error: unknown): string {
   const name = error instanceof Error ? error.name : '';

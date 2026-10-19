@@ -50,6 +50,16 @@ describe('ensureFileCookies', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(COOKIE_REFRESH_MS).toBe(3_000_000);
   });
+  it('refreshes before the 50 minutes when forced, sharing an in-flight request (R3-03)', async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => new Response('{"success":true}'));
+    vi.stubGlobal('fetch', fetchMock);
+    const clock = () => 1_000;
+    await ensureFileCookies(SLIDE_COOKIES_PATH, clock);
+    await ensureFileCookies(SLIDE_COOKIES_PATH, clock, false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await Promise.all([ensureFileCookies(SLIDE_COOKIES_PATH, clock, true), ensureFileCookies(SLIDE_COOKIES_PATH, clock, true)]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
   it('retries after a failure', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response('{"error":{"code":"X","message":"失敗"}}', { status: 500 }))

@@ -46,7 +46,7 @@ export interface LambdaResponse { statusCode: number; headers: Record<string, st
 interface ApiDependencies { env: Env; clients: Clients; authenticate?: typeof authenticate; now?: () => number }
 type JsonRecord = Record<string, unknown>;
 type DevicePurpose = keyof typeof STAGE_LIMITS;
-interface Lease extends Entity { deviceId: string; userId: string; purpose: DevicePurpose; deviceName: string; ttl: number; participantId?: string; stageArn?: string }
+interface Lease extends Entity { deviceId: string; userId: string; purpose: DevicePurpose; deviceName: string; ttl: number; participantId?: string; stageArn?: string; replacedDeviceId?: string }
 
 const LEASE_SECONDS = 45;
 const COOKIE_SECONDS = 60 * 60;
@@ -128,12 +128,24 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
     return lease?.deviceId === deviceId ? lease : undefined;
   }
 
-  async function acquireDevice(principal: Principal, purpose: DevicePurpose, deviceName: string): Promise<{ deviceId: string; sk: string }> {
+  /** 枠が同じ名前の別の稼働中端末に置き換わったか。失効（404・再接続対象）と区別する（R3-02）。 */
+  async function wasReplaced(principal: Principal, deviceId: string): Promise<boolean> {
+    const match = DEVICE_ID_PATTERN.exec(deviceId);
+    if (!match) return false;
+    const current = await getDb().get<Lease>(KEYS.devicePk, KEYS.deviceSk(match[1]!, Number(match[2])), true);
+    if (!current || current.deviceId === deviceId || current.ttl <= nowSeconds() || current.replacedDeviceId !== deviceId) return false;
+    // 引き継ぎは本人だけが行えるので、所有者（または admin）以外には失効と同じ 404 を返す
+    return current.userId === principal.userId || principal.role === 'admin';
+  }
+
+  async function acquireDevice(principal: Principal, purpose: DevicePurpose, deviceName: string, takeover: boolean): Promise<{ deviceId: string; sk: string }> {
     const nowS = nowSeconds();
     const leases = await getDb().query<Lease>(KEYS.devicePk, { skPrefix: `${purpose}#`, consistentRead: true });
-    // 同名の稼働中端末: 他人なら拒否、本人なら再接続としてその枠を置き換える（R1-18）
+    // 同名の稼働中端末: 他人なら拒否。本人でも takeover を明示したときだけ置き換える（R1-18 / R3-02）。
+    // 暗黙に置き換えると、同じ端末名の2端末がハートビートのたびに互いを切断し合うため。
     const sameName = purpose === 'slide' ? undefined : leases.find((lease) => lease.ttl > nowS && lease.deviceName === deviceName);
     if (sameName && sameName.userId !== principal.userId) throw conflict('DEVICE_NAME_IN_USE', 'この端末名は使用中です');
+    if (sameName && !takeover) throw conflict('DEVICE_NAME_IN_USE_SELF', 'この端末名はあなたの別の端末で使用中です');
     const slots = sameName ? [sameName.SK] : Array.from({ length: STAGE_LIMITS[purpose] }, (_, index) => KEYS.deviceSk(purpose, index + 1));
     for (const sk of slots) {
       const deviceId = `${sk.replace('#', '.')}.${randomUUID()}`;
@@ -141,7 +153,8 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
       try {
         const result = await getClients().ddb.send(new PutCommand({
           TableName: getEnvValue().TABLE_NAME,
-          Item: entity(KEYS.devicePk, sk, { deviceId, purpose, deviceName, userId: principal.userId, ttl: nowS + LEASE_SECONDS, createdAt: iso(now()) }),
+          // 引き継ぎ元を残し、置き換えられた端末のハートビートに DEVICE_REPLACED を返せるようにする
+          Item: entity(KEYS.devicePk, sk, { deviceId, purpose, deviceName, userId: principal.userId, ttl: nowS + LEASE_SECONDS, createdAt: iso(now()), ...(sameName ? { replacedDeviceId: sameName.deviceId } : {}) }),
           ...(sameName
             ? { ConditionExpression: 'deviceId = :previous', ExpressionAttributeValues: { ':previous': sameName.deviceId } }
             : { ConditionExpression: 'attribute_not_exists(PK) OR #ttl <= :now', ExpressionAttributeNames: { '#ttl': 'ttl' }, ExpressionAttributeValues: { ':now': nowS } }),
@@ -153,7 +166,7 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
         throw error;
       }
       try {
-        await disconnectLease(previous, sameName ? '同じ端末名で再接続されました' : '送信枠が失効しました');
+        await disconnectLease(previous, sameName ? '同じ端末名の別の端末に引き継がれました' : '送信枠が失効しました');
       } catch (error) {
         // 旧参加者が接続したままなので旧枠を戻す。条件付きにして、その後の他端末の取得は上書きしない（R2-01）
         // 切断を試みるのは旧枠がある場合だけなので previous は ALL_OLD の完全な行
@@ -165,7 +178,7 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
     throw conflict('DEVICE_LIMIT', '送信端末の上限に達しています');
   }
 
-  async function issueStageToken(principal: Principal, purpose: StagePurpose, deviceName?: string) {
+  async function issueStageToken(principal: Principal, purpose: StagePurpose, deviceName?: string, takeover = false) {
     if (!canRequestPurpose(principal.role, purpose)) throw forbidden();
     const env = getEnvValue();
     // switcher は端末枠を使わない（R1-02）。1回の応答の3トークンを Web が使い回す。
@@ -178,7 +191,7 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
     };
     const resolvedDeviceName = purpose === 'slide' ? 'SLIDE' : deviceName ?? purpose.toUpperCase();
     const attributes = purpose === 'viewer' ? undefined : { kind: purpose, deviceName: resolvedDeviceName };
-    const device = purpose === 'camera' || purpose === 'mic' || purpose === 'slide' ? await acquireDevice(principal, purpose, resolvedDeviceName) : undefined;
+    const device = purpose === 'camera' || purpose === 'mic' || purpose === 'slide' ? await acquireDevice(principal, purpose, resolvedDeviceName, takeover) : undefined;
     try {
       const tokens = await Promise.all(stagesByPurpose[purpose].map(async ([stageName, stageArn, capability]) => {
         const result = await getClients().ivs.send(new CreateParticipantTokenCommand({
@@ -290,6 +303,7 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
         if (isConditionalFailure(error)) throw conflict('BROADCAST_LIVE', '配信はすでに開始しています');
         throw error;
       }
+      let compositionArn: string | undefined;
       try {
         const start = await clients.ivs.send(new StartCompositionCommand({
           stageArn: env.STAGE_BROADCAST_ARN,
@@ -299,12 +313,14 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
             s3: { storageConfigurationArn: env.RECORDING_STORAGE_CONFIGURATION_ARN, encoderConfigurationArns: [env.ENCODER_CONFIGURATION_ARN], recordingConfiguration: { hlsConfiguration: { targetSegmentDurationSeconds: 10 }, format: 'HLS' } },
           }],
         }));
-        const compositionArn = start.composition?.arn;
+        compositionArn = start.composition?.arn;
         // 録画先 prefix は outputPrefix として保存する（recordingPrefix 属性はアーカイブ行専用）
         const outputPrefix = start.composition?.destinations?.find((destination) => destination.detail?.s3?.recordingPrefix)?.detail?.s3?.recordingPrefix;
         await db.update('BROADCAST', 'CURRENT', 'SET #status = :live, compositionArn = :compositionArn, outputPrefix = :outputPrefix', { ':live': 'live', ':compositionArn': compositionArn ?? '', ':outputPrefix': outputPrefix ?? '', ':id': broadcastId }, 'id = :id', { '#status': 'status' });
         if (compositionArn) await db.put(entity(KEYS.compositionPk(compositionArn), 'META', { broadcastId, title, startedAt, outputPrefix }));
       } catch (error) {
+        // Composition を開始済みなら止める。残すと録画と課金が続き、META がないためアーカイブにも載らない（R3-11）
+        if (compositionArn) await clients.ivs.send(new StopCompositionCommand({ arn: compositionArn })).catch(() => undefined);
         await db.delete('BROADCAST', 'CURRENT', 'id = :id', { ':id': broadcastId }).catch(() => undefined);
         throw error;
       }
@@ -365,7 +381,7 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
     }
     if (path === '/tokens/stage' && method === 'POST') {
       const request = valid(StageTokenRequestSchema, body);
-      return success(await issueStageToken(principal, request.purpose, request.deviceName));
+      return success(await issueStageToken(principal, request.purpose, request.deviceName, request.takeover));
     }
     if (parts[0] === 'devices') {
       if (parts.length === 1 && method === 'GET') {
@@ -374,9 +390,19 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
         const nowS = nowSeconds();
         return success(devices.filter((d) => Number(d.ttl) > nowS).map((d) => ({ deviceId: d.deviceId, deviceName: d.deviceName, kind: d.purpose, userId: d.userId, connected: true })));
       }
+      if (parts.length === 2 && parts[1] === 'names' && method === 'GET') {
+        // 端末名の初期値を空いている名前にするため、他人が使用中の名前だけを返す（R3-01）
+        const purpose = new URLSearchParams(event.rawQueryString ?? '').get('purpose');
+        if (purpose !== 'camera' && purpose !== 'mic') throw badRequest('purpose は camera か mic を指定してください');
+        if (!canRequestPurpose(principal.role, purpose)) throw forbidden();
+        const nowS = nowSeconds();
+        const leases = await db.query<Lease>(KEYS.devicePk, { skPrefix: `${purpose}#`, consistentRead: true });
+        return success({ inUse: leases.filter((lease) => lease.ttl > nowS && lease.userId !== principal.userId).map((lease) => lease.deviceName) });
+      }
       if (parts.length === 3 && parts[2] === 'heartbeat' && method === 'POST') {
         const { deviceId } = valid(DeviceIdParamsSchema, { deviceId: parts[1] });
         const device = await findLease(deviceId);
+        if (!device && await wasReplaced(principal, deviceId)) throw conflict('DEVICE_REPLACED', '同じ端末名の別の端末に引き継がれました');
         if (!device || (device.userId !== principal.userId && principal.role !== 'admin')) throw notFound();
         const ttl = nowSeconds() + LEASE_SECONDS;
         await orNotFound(db.update(device.PK, device.SK, 'SET #ttl = :ttl', { ':ttl': ttl, ':deviceId': deviceId }, 'deviceId = :deviceId', { '#ttl': 'ttl' }));

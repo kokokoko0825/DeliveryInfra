@@ -14,6 +14,13 @@ export function healthOf(input: HealthInput, now: number, thresholdMs = STALL_TH
   return 'live';
 }
 
+/** 健全性の一覧が同じか（ソースと状態がすべて一致）。 */
+export function sameHealth(a: ReadonlyMap<string, SourceHealth>, b: ReadonlyMap<string, SourceHealth>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [source, health] of a) if (b.get(source) !== health) return false;
+  return true;
+}
+
 export const HEALTH_LABEL: Record<SourceHealth, string> = { live: '受信中', stalled: '映像途絶', disconnected: '未接続' };
 
 const collator = new Intl.Collator('ja', { numeric: true });

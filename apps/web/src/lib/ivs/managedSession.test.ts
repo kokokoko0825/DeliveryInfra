@@ -102,6 +102,45 @@ describe('createManagedSession', () => {
     expect(await managed.getOutboundStats()).toBeUndefined();
   });
 
+  it('stops without reconnecting when the server disconnects the participant (R3-02)', async () => {
+    const { queue, scheduler: s } = scheduler();
+    const onStatus = vi.fn();
+    const onReset = vi.fn();
+    const onEnded = vi.fn();
+    const handlerEnded = vi.fn();
+    const fetchToken = vi.fn().mockResolvedValue('t');
+    const managed = createManagedSession({ fetchToken, publish: true, subscribe: false, onStatus, onReset, onEnded, scheduler: s, handlers: { onEnded: handlerEnded } });
+    await managed.start();
+    const first = fake.sessions[0]!;
+    first.handlers.onEnded?.('participant-disconnected');
+    expect(first.leave).toHaveBeenCalledTimes(1);
+    expect(onReset).toHaveBeenCalledTimes(1);
+    expect(onStatus).toHaveBeenLastCalledWith('idle');
+    expect(onEnded).toHaveBeenCalledWith('participant-disconnected');
+    expect(handlerEnded).toHaveBeenCalledWith('participant-disconnected');
+    expect(queue).toHaveLength(0);
+    // 以降の切断通知では再接続しない（相互切断ループの防止）
+    first.handlers.onRecoverableLoss?.('errored');
+    first.handlers.onEnded?.('participant-disconnected');
+    expect(queue).toHaveLength(0);
+    expect(onEnded).toHaveBeenCalledTimes(1);
+    expect(fetchToken).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels a pending reconnect when the server ends the session (R3-02)', async () => {
+    const { queue, scheduler: s } = scheduler();
+    const managed = createManagedSession({ fetchToken: vi.fn().mockResolvedValue('t'), publish: true, subscribe: false, scheduler: s });
+    await managed.start();
+    managed.restart();
+    queue.shift()?.();
+    await flush();
+    fake.sessions[1]!.handlers.onRecoverableLoss?.('errored');
+    expect(queue).toHaveLength(1);
+    // 再接続待ちの間に古い（現在でない）セッションの終了通知が来ても無視する
+    fake.sessions[0]!.handlers.onEnded?.('participant-disconnected');
+    expect(queue).toHaveLength(1);
+  });
+
   it('restart drops the current session and schedules a reconnect', async () => {
     const { queue, scheduler: s } = scheduler();
     const onStatus = vi.fn();

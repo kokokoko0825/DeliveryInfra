@@ -1,10 +1,11 @@
-import type { Dispatch } from 'react';
+import { useEffect, useState, type Dispatch } from 'react';
 import { SlidersHorizontal, Volume2, VolumeX } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { Slider } from '@/components/ui/slider';
 import { Toggle } from '@/components/ui/toggle';
 import { cn } from '@/lib/utils';
+import type { Levels } from '../useSwitcher';
 import { channelOf, micChannel, SLIDE_CHANNEL, VOLUME_MAX, VOLUME_MIN, type Channel, type MixerAction, type MixerState } from '../engine/mixer';
 
 function ChannelStrip({ label, channel, level, connected, onVolume, onMute }: {
@@ -28,9 +29,24 @@ function ChannelStrip({ label, channel, level, connected, onVolume, onMute }: {
   );
 }
 
-export function MixerPanel({ state, dispatch, micNames, connected, levels }: {
-  state: MixerState; dispatch: Dispatch<MixerAction>; micNames: string[]; connected: Set<string>; levels: { channels: Map<string, number>; master: number };
+export const LEVEL_INTERVAL_MS = 100;
+const SILENT: Levels = { channels: new Map(), master: 0 };
+
+/** レベルを 100ms ごとに読む。再描画をこのパネル内に閉じ込める（R3-10）。 */
+function useLevels(read: () => Levels, enabled: boolean): Levels {
+  const [levels, setLevels] = useState<Levels>(SILENT);
+  useEffect(() => {
+    if (!enabled) return undefined;
+    const timer = setInterval(() => setLevels(read()), LEVEL_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [enabled, read]);
+  return levels;
+}
+
+export function MixerPanel({ state, dispatch, micNames, connected, readLevels, running }: {
+  state: MixerState; dispatch: Dispatch<MixerAction>; micNames: string[]; connected: Set<string>; readLevels: () => Levels; running: boolean;
 }) {
+  const levels = useLevels(readLevels, running);
   const channels = [...micNames.map((name) => ({ id: micChannel(name), label: name })), { id: SLIDE_CHANNEL, label: 'PC音声' }];
   return (
     <Card className="gap-4 py-4">

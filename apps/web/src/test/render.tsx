@@ -13,7 +13,7 @@ export const makeMe = (overrides: Partial<MeResponse> = {}): MeResponse => ({
 });
 
 export const makeAuth = (overrides: Partial<AuthContextValue> = {}): AuthContextValue => ({
-  status: 'signedIn', me: makeMe(), config: { region: 'ap-northeast-1', userPoolId: 'pool', userPoolClientId: 'client' }, error: null,
+  status: 'signedIn', me: makeMe(), config: { region: 'ap-northeast-1', userPoolId: 'pool', userPoolClientId: 'client' }, error: null, loginError: null,
   refresh: vi.fn(async () => makeMe()), setMe: vi.fn(), logout: vi.fn(async () => undefined), ...overrides,
 });
 
