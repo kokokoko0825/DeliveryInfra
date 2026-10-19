@@ -71,14 +71,18 @@ export function BroadcastPanel({ running, publishing, bitrate, startPublishing, 
   const start = async () => {
     if (!titleCheck.success) return;
     setBusy(true);
+    let started = false;
     try {
       // 先に配信用ステージへ送り始めてから、録画（コンポジション）を開始する
       await startPublishing();
-      queryClient.setQueryData(queryKeys.broadcast, await startBroadcast(titleCheck.data));
+      const broadcast = await startBroadcast(titleCheck.data);
+      started = true;
+      queryClient.setQueryData(queryKeys.broadcast, broadcast);
       toast.success('配信を開始しました');
       setTitle('');
     } catch (error) {
-      stopPublishing();
+      // 開始の応答が成功した後は、番組の送信を止めない（R4-01）
+      if (!started) stopPublishing();
       toast.error(errorMessage(error));
     } finally {
       await refresh();

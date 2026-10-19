@@ -22,7 +22,7 @@ import {
   NgWordRequestSchema, RecentCommentsResponseSchema, ROLES, RoleSchema, SlideIdParamsSchema, SlideOrderRequestSchema,
   SlideUploadSchema, SlideUpdateRequestSchema, StageTokenRequestSchema, UserIdParamsSchema,
   UpdateRoleRequestSchema, SLIDE_MAX_BYTES, STAGE_LIMITS, TOKEN_TTL_SECONDS, COMMENT_HISTORY_LIMIT,
-  type Feature, type Role, type StagePurpose, type UserInviteResponse,
+  type ChatEventName, type Feature, type Role, type StagePurpose, type UserInviteResponse,
 } from '@delivery/shared';
 import { authenticate, TOKEN_VALID_AFTER_SK, type Principal } from './auth';
 import { createClients, type Clients } from './aws';
@@ -54,6 +54,9 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 /** deviceId は `<purpose>.<slot>.<uuid>`。スロットを埋め込んで Scan せずに引けるようにする（R1-10）。 */
 const DEVICE_ID_PATTERN = /^(camera|mic|slide)\.([1-9]\d*)\.([0-9a-f-]{36})$/u;
 const SAFE_PREFIX_PATTERN = /^[A-Za-z0-9/_-]+$/u;
+/** 確定後の Chat 通知の再試行回数と初回の待ち時間（R4-01）。 */
+const NOTIFY_RETRIES = 3;
+const NOTIFY_BACKOFF_MS = 50;
 let signingKeyCache: { value: string; expiresAt: number } | undefined;
 const adminFeature = (principal: Principal, feature: Feature) => { if (!canAccess(principal.role, feature)) throw forbidden(); };
 const audit = (principal: Principal, action: string, target?: string) => console.info(JSON.stringify({ audit: true, userId: principal.userId, action, target, at: new Date().toISOString() }));
@@ -102,13 +105,25 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
   const nowSeconds = () => Math.floor(now() / 1000);
   const auth = dependencies?.authenticate ?? authenticate;
 
-  async function sendChatEvent(eventName: string, attributes: Record<string, string> = {}) {
-    const validated = valid(ChatCustomEventSchema, { eventName, attributes });
-    await getClients().chat.send(new SendEventCommand({
-      roomIdentifier: getEnvValue().CHAT_ROOM_ARN,
-      eventName: validated.eventName,
-      attributes: validated.attributes,
-    }));
+  /**
+   * 状態を確定した後の Chat 通知。短いバックオフで最大3回まで再試行し、それでも失敗したら警告ログだけ残して成功扱いにする。
+   * 確定済みの操作を 500 にすると、画面が失敗と表示し、再試行が 404 になるため（R4-01 / R3-14）。
+   * 通知の欠落は、クライアントのポーリングと再取得で回復する。
+   */
+  async function notify(eventName: ChatEventName) {
+    const validated = valid(ChatCustomEventSchema, { eventName });
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await getClients().chat.send(new SendEventCommand({ roomIdentifier: getEnvValue().CHAT_ROOM_ARN, eventName: validated.eventName }));
+        return;
+      } catch (error) {
+        if (attempt >= NOTIFY_RETRIES) {
+          console.warn(JSON.stringify({ warning: 'CHAT_EVENT_FAILED', eventName, name: errorName(error), message: error instanceof Error ? error.message : String(error) }));
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, NOTIFY_BACKOFF_MS * 2 ** attempt));
+      }
+    }
   }
 
   /** 失効した枠や置き換える枠の参加者を IVS から切断する。既に居ない場合は成功扱い（R1-07）。 */
@@ -324,16 +339,17 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
         await db.delete('BROADCAST', 'CURRENT', 'id = :id', { ':id': broadcastId }).catch(() => undefined);
         throw error;
       }
-      await sendChatEvent('broadcast-started');
       audit(principal, 'broadcast.start');
+      await notify('broadcast-started');
       return success({ id: broadcastId, title, status: 'live', startedAt, endedAt: null });
     }
     if (path === '/broadcast/stop' && method === 'POST') {
       adminFeature(principal, 'broadcastManage');
       const broadcast = await db.get<Entity & { status?: string; compositionArn?: string; id?: string; title?: string; startedAt?: string; endedAt?: string }>('BROADCAST', 'CURRENT');
       if (broadcast?.status === 'ended') {
-        // 前回の停止で SendEvent だけ失敗した場合の再試行。終了通知を再送する（重複はクライアントが許容する、R2-03）
-        await sendChatEvent('broadcast-ended');
+        // 前回の停止で通知が届かなかった場合の再試行。終了通知を再送する（重複はクライアントが許容する、R2-03）
+        audit(principal, 'broadcast.stop.retry', broadcast.id);
+        await notify('broadcast-ended');
         return success({ id: broadcast.id, title: broadcast.title, status: 'ended', startedAt: broadcast.startedAt, endedAt: broadcast.endedAt ?? null });
       }
       if (!broadcast || broadcast.status !== 'live') throw conflict('BROADCAST_NOT_LIVE', '配信中ではありません');
@@ -344,8 +360,8 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
       }
       const endedAt = iso(now());
       await db.update('BROADCAST', 'CURRENT', 'SET #status = :status, endedAt = :endedAt', { ':status': 'ended', ':endedAt': endedAt }, 'attribute_exists(PK)', { '#status': 'status' });
-      await sendChatEvent('broadcast-ended');
       audit(principal, 'broadcast.stop', broadcast.id);
+      await notify('broadcast-ended');
       return success({ id: broadcast.id, title: broadcast.title, status: 'ended', startedAt: broadcast.startedAt, endedAt });
     }
     if (path === '/broadcast/stats' && method === 'GET') {
@@ -447,8 +463,9 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
       const { userId } = valid(UserIdParamsSchema, { userId: parts[1] });
       const { suspended } = valid(CommentSuspensionRequestSchema, body);
       await db.update(KEYS.user(userId), 'PROFILE', 'SET commentSuspended = :suspended, updatedAt = :updatedAt', { ':suspended': suspended, ':updatedAt': iso(now()) });
-      if (suspended) await clients.chat.send(new DisconnectUserCommand({ roomIdentifier: env.CHAT_ROOM_ARN, userId, reason: 'コメント送信停止' }));
       audit(principal, 'comment.suspension', userId);
+      // 停止・解除とも切断する。本人のクライアントは再接続で /me とトークンの権限を取り直す（R4-02）
+      await clients.chat.send(new DisconnectUserCommand({ roomIdentifier: env.CHAT_ROOM_ARN, userId, reason: suspended ? 'コメント送信停止' : 'コメント送信停止の解除' }));
       return success();
     }
     if (path === '/comments/export' && method === 'GET') {
@@ -501,8 +518,8 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
       if (!prefix || Buffer.from(prefix).toString('ascii') !== '%PDF-') throw badRequest('PDF ファイルとして読み取れません');
       const order = (await db.query<Entity & JsonRecord>(KEYS.slidePk)).filter((slide) => slide.published).length;
       await orNotFound(db.update(KEYS.slidePk, id, 'SET published = :published, #status = :status, #order = :order', { ':published': true, ':status': 'ready', ':order': order }, 'attribute_exists(PK)', { '#status': 'status', '#order': 'order' }));
-      await sendChatEvent('slides-updated');
       audit(principal, 'slide.complete', id);
+      await notify('slides-updated');
       return success(toSlide({ ...item, published: true, status: 'ready', order }));
     }
     if (parts[0] === 'slides' && parts[1] && parts.length === 2 && method === 'PATCH') {
@@ -519,8 +536,8 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
       adminFeature(principal, 'slideManage');
       const { ids } = valid(SlideOrderRequestSchema, body);
       await orNotFound(Promise.all(ids.map((id, order) => db.update(KEYS.slidePk, id, 'SET #order = :order', { ':order': order }, 'attribute_exists(PK)', { '#order': 'order' }))));
-      await sendChatEvent('slides-updated');
       audit(principal, 'slide.order');
+      await notify('slides-updated');
       return success();
     }
     if (parts[0] === 'slides' && parts[1] && parts.length === 2 && method === 'DELETE') {
@@ -530,8 +547,8 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
       if (!item) throw notFound();
       await clients.s3.send(new DeleteObjectsCommand({ Bucket: env.CONTENT_BUCKET, Delete: { Objects: [{ Key: String(item.key) }] } }));
       await db.delete(KEYS.slidePk, id);
-      await sendChatEvent('slides-updated');
       audit(principal, 'slide.delete', id);
+      await notify('slides-updated');
       return success();
     }
     if (path === '/archives' && method === 'GET') {
@@ -565,8 +582,8 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
         values[':ttl'] = Math.floor(retainUntilMs / 1000);
       }
       await orNotFound(db.update(KEYS.archivePk, id, `SET ${setters.join(', ')}`, values, 'attribute_exists(PK)', patch.retainUntil === undefined ? undefined : { '#ttl': 'ttl' }));
-      await sendChatEvent('archives-updated');
       audit(principal, 'archive.update', id);
+      await notify('archives-updated');
       return success(toArchive(await getArchive(id)));
     }
     if (parts[0] === 'archives' && parts[1] && parts.length === 2 && method === 'DELETE') {
@@ -576,8 +593,8 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
       if (!item) throw notFound();
       await deletePrefix(clients.s3, env.RECORDING_BUCKET, archivePrefix(item));
       await db.delete(KEYS.archivePk, id);
-      await sendChatEvent('archives-updated');
       audit(principal, 'archive.delete', id);
+      await notify('archives-updated');
       return success();
     }
     if (path === '/files/cookies' && method === 'POST') return signedCookies(event, '/files/slides/');
@@ -619,6 +636,17 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
       }
       audit(principal, 'user.invite', `${result.invited.length}/${request.emails.length}`);
       return success(result);
+    }
+    if (parts[0] === 'users' && parts[1] && parts[2] === 'resend-invite' && parts.length === 3 && method === 'POST') {
+      adminFeature(principal, 'userManage');
+      const { userId } = valid(UserIdParamsSchema, { userId: parts[1] });
+      const username = await resolveUsername(clients, env, userId);
+      // 仮パスワード（7日）の期限切れから戻すため、初回パスワード未設定のユーザーにだけ招待を再送する（R3-13）
+      const user = await clients.cognito.send(new AdminGetUserCommand({ UserPoolId: env.USER_POOL_ID, Username: username }));
+      if (user.UserStatus !== 'FORCE_CHANGE_PASSWORD') throw conflict('INVITE_NOT_PENDING', 'このユーザーはすでにパスワードを設定済みです');
+      await clients.cognito.send(new AdminCreateUserCommand({ UserPoolId: env.USER_POOL_ID, Username: username, MessageAction: 'RESEND', DesiredDeliveryMediums: ['EMAIL'] }));
+      audit(principal, 'user.invite.resend', userId);
+      return success();
     }
     if (parts[0] === 'users' && parts[1] && parts[2] === 'role' && method === 'PUT') {
       adminFeature(principal, 'userManage');
@@ -732,7 +760,7 @@ async function listUsers(clients: Clients, env: Env): Promise<JsonRecord[]> {
     const role = RoleSchema.safeParse(roles[0]);
     const profile = records.get(`${KEYS.user(userId)}|PROFILE`) as { commentSuspended?: boolean } | undefined;
     const login = records.get(`${KEYS.user(userId)}|LOGIN`) as { lastLoginAt?: string; loginMethod?: string } | undefined;
-    return { userId, email: attribute(user.Attributes, 'email') ?? '', loginMethod: login?.loginMethod ?? loginMethodOf(user.Attributes), role: role.success && roles.length === 1 ? role.data : null, enabled: user.Enabled === true, commentSuspended: profile?.commentSuspended === true, lastLoginAt: login?.lastLoginAt ?? null };
+    return { userId, email: attribute(user.Attributes, 'email') ?? '', loginMethod: login?.loginMethod ?? loginMethodOf(user.Attributes), role: role.success && roles.length === 1 ? role.data : null, enabled: user.Enabled === true, commentSuspended: profile?.commentSuspended === true, lastLoginAt: login?.lastLoginAt ?? null, invitePending: user.UserStatus === 'FORCE_CHANGE_PASSWORD' };
   });
 }
 

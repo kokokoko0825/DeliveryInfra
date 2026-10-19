@@ -91,6 +91,13 @@ describe('authErrorMessage', () => {
   it('translates Cognito errors', () => {
     expect(auth.authErrorMessage(named('NotAuthorizedException', 'Incorrect username or password.'))).toBe('メールアドレスまたはパスワードが正しくありません');
     expect(auth.authErrorMessage(named('UserNotFoundException'))).toBe('メールアドレスまたはパスワードが正しくありません');
+    // 仮パスワードの期限切れ（R3-13）と、初回パスワード設定の認証セッション切れ（R4-04）は専用の文言
+    expect(auth.authErrorMessage(named('NotAuthorizedException', 'Temporary password has expired and must be reset by an administrator.'))).toBe('仮パスワードの有効期限が切れています。管理者に招待の再送を依頼してください');
+    expect(auth.authErrorMessage(named('NotAuthorizedException', 'Invalid session for the user, session is expired.'))).toBe('時間が経過したため、もう一度ログインからやり直してください');
+    expect(auth.isAuthSessionExpired(named('NotAuthorizedException', 'Invalid session for the user, session is expired.'))).toBe(true);
+    expect(auth.isAuthSessionExpired(named('NotAuthorizedException', 'Incorrect username or password.'))).toBe(false);
+    expect(auth.isAuthSessionExpired(named('CodeMismatchException', 'Invalid session'))).toBe(false);
+    expect(auth.isAuthSessionExpired('session is expired')).toBe(false);
     expect(auth.authErrorMessage(named('NotAuthorizedException', 'Password attempts exceeded'))).toBe('ログイン試行回数の上限に達しました。しばらく待ってから再度お試しください');
     expect(auth.authErrorMessage(named('CodeMismatchException'))).toBe('確認コードが正しくありません');
     expect(auth.authErrorMessage(named('ExpiredCodeException'))).toBe('確認コードの有効期限が切れています。もう一度送信してください');

@@ -7,6 +7,7 @@ import { NewPasswordSchema, ResetConfirmSchema } from './password-schemas';
 const auth = vi.hoisted(() => ({
   completeNewPassword: vi.fn(), requestPasswordReset: vi.fn(), confirmPasswordReset: vi.fn(),
   authErrorMessage: vi.fn((e: unknown) => (e as Error).message),
+  isAuthSessionExpired: vi.fn(() => false),
 }));
 const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
 vi.mock('@/lib/auth', () => auth);
@@ -73,6 +74,21 @@ describe('PasswordPage (C-02) first login', () => {
     auth.completeNewPassword.mockRejectedValueOnce(new Error('ポリシー違反'));
     fireEvent.click(screen.getByRole('button', { name: 'パスワードを設定' }));
     expect(await screen.findByText('ポリシー違反')).toBeInTheDocument();
+  });
+});
+
+describe('PasswordPage (C-02) session expiry', () => {
+  it('switches to a button that restarts from the login screen when the auth session expired (R4-04)', async () => {
+    auth.completeNewPassword.mockRejectedValueOnce(new Error('時間が経過したため、もう一度ログインからやり直してください'));
+    auth.isAuthSessionExpired.mockReturnValueOnce(true);
+    open({ mode: 'new' });
+    type('新しいパスワード', GOOD);
+    type('新しいパスワード（確認）', GOOD);
+    fireEvent.click(screen.getByRole('button', { name: 'パスワードを設定' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('時間が経過したため、もう一度ログインからやり直してください');
+    expect(screen.queryByRole('button', { name: 'パスワードを設定' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('link', { name: 'ログインからやり直す' }));
+    expect(await screen.findByText('at:/login')).toBeInTheDocument();
   });
 });
 

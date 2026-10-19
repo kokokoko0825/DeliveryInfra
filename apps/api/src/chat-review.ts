@@ -1,5 +1,5 @@
 import { GetCommand, PutCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb';
-import { CommentSchema, containsNgWord } from '@delivery/shared';
+import { CHAT_DENY_REASONS, CommentSchema, containsNgWord } from '@delivery/shared';
 import { createClients } from './aws';
 import { getChatReviewEnv, type ChatReviewEnv } from './env';
 import type { Clients } from './aws';
@@ -23,11 +23,11 @@ export function createChatReviewHandler(dependencies?: { env?: ChatReviewEnv; cl
     const clients = dependencies?.clients ?? createClients(env);
     const profile = await clients.ddb.send(new GetCommand({ TableName: env.TABLE_NAME, Key: { PK: KEYS.user(event.Sender.UserId), SK: 'PROFILE' }, ConsistentRead: true }));
     const profileItem = profile.Item as { displayName?: string; commentSuspended?: boolean } | undefined;
-    if (!profileItem?.displayName) return deny(content, '表示名を設定してください');
-    if (profileItem.commentSuspended) return deny(content, 'コメントの送信が停止されています');
+    if (!profileItem?.displayName) return deny(content, CHAT_DENY_REASONS.displayNameMissing);
+    if (profileItem.commentSuspended) return deny(content, CHAT_DENY_REASONS.suspended);
     // NG ワードは固定 PK の Query で読む（R1-10）。追加直後から効くよう強整合読み込み
     const words = (await makeDatabase(clients.ddb, env).query<{ PK: string; SK: string; word?: string }>(KEYS.ngWordPk, { consistentRead: true })).flatMap((item) => item.word ? [item.word] : []);
-    if (containsNgWord(content, words)) return deny(content, '使用できない単語が含まれています');
+    if (containsNgWord(content, words)) return deny(content, CHAT_DENY_REASONS.ngWord);
 
     const now = dependencies?.now?.() ?? Date.now();
     const nowSeconds = Math.floor(now / 1000);
@@ -39,7 +39,7 @@ export function createChatReviewHandler(dependencies?: { env?: ChatReviewEnv; cl
         ExpressionAttributeNames: { '#lastSentAt': 'lastSentAt' }, ExpressionAttributeValues: { ':cutoff': now - 3000 },
       }));
     } catch (error) {
-      if ((error as { name?: string }).name === 'ConditionalCheckFailedException') return deny(content, 'コメントは3秒に1回まで送信できます');
+      if ((error as { name?: string }).name === 'ConditionalCheckFailedException') return deny(content, CHAT_DENY_REASONS.rateLimited);
       throw error;
     }
     const sentAt = new Date(now).toISOString();

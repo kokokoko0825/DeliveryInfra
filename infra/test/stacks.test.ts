@@ -296,13 +296,18 @@ describe('stg(既定)', () => {
         for (const action of [s.Action].flat()) expect(action).not.toMatch(/(^\*$|:\*$)/);
       }
     });
-    it('Resource "*" は ivs:ListCompositions と CDK 内部のみ', () => {
+    it('Resource "*" は CDK 内部のみ（アプリの Lambda は持たない、R4-07）', () => {
       const wildcard = statements().filter((s) => s.Resource === '*');
-      for (const s of wildcard) {
-        if (s.id.startsWith('ApiFunction')) expect(s.Action).toBe('ivs:ListCompositions');
-        else expect(s.id).toMatch(/^(AWS|Custom|CustomCDKBucketDeployment)/);
-      }
+      for (const s of wildcard) expect(s.id).toMatch(/^(AWS|Custom|CustomCDKBucketDeployment)/);
     });
+    it('api: 未使用の Composition 取得・一覧と comment-exports への権限を持たない（R4-07）', () => {
+      const actions = policyOf('ApiFunction').flatMap((s) => [s.Action].flat());
+      expect(actions).not.toContain('ivs:ListCompositions');
+      expect(actions).not.toContain('ivs:GetComposition');
+      expect(policyOf('ApiFunction')).toContainEqual({ Effect: 'Allow', Action: 'ivs:StopComposition', Resource: 'arn:aws:ivs:ap-northeast-1:123456789012:composition/*' });
+      expect(JSON.stringify(policyOf('ApiFunction'))).not.toContain('comment-exports');
+    });
+
     const policyOf = (prefix: string) =>
       statements()
         .filter((s) => s.id.startsWith(prefix))

@@ -10,7 +10,7 @@ import { Input } from '@/components/ui/input';
 import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form';
 import { AuthShell } from '@/components/app/AuthShell';
 import { ErrorText } from '@/components/app/StatusView';
-import { authErrorMessage, completeNewPassword, confirmPasswordReset, requestPasswordReset } from '@/lib/auth';
+import { authErrorMessage, completeNewPassword, confirmPasswordReset, isAuthSessionExpired, requestPasswordReset } from '@/lib/auth';
 import { useAuth } from './auth-context';
 import { NewPasswordSchema, ResetConfirmSchema, ResetRequestSchema } from './password-schemas';
 
@@ -45,6 +45,7 @@ function NewPasswordForm() {
   const { refresh } = useAuth();
   const navigate = useNavigate();
   const [error, setError] = useState<string | null>(null);
+  const [expired, setExpired] = useState(false);
   const form = useForm<z.infer<typeof NewPasswordSchema>>({ resolver: zodResolver(NewPasswordSchema), defaultValues: { newPassword: '', confirmPassword: '' } });
   const onSubmit = async ({ newPassword }: z.infer<typeof NewPasswordSchema>) => {
     setError(null);
@@ -54,6 +55,8 @@ function NewPasswordForm() {
       if (await refresh()) navigate('/display-name', { replace: true });
       else setError('ユーザー情報を取得できませんでした。再度ログインしてください');
     } catch (cause) {
+      // 認証セッション切れは再入力しても通らないので、ログインからやり直す導線に切り替える（R4-04）
+      setExpired(isAuthSessionExpired(cause));
       setError(authErrorMessage(cause));
     }
   };
@@ -63,7 +66,9 @@ function NewPasswordForm() {
         <TextField form={form} name="newPassword" label="新しいパスワード" type="password" autoComplete="new-password" description={POLICY} />
         <TextField form={form} name="confirmPassword" label="新しいパスワード（確認）" type="password" autoComplete="new-password" />
         {error && <ErrorText message={error} />}
-        <SubmitButton pending={form.formState.isSubmitting}>パスワードを設定</SubmitButton>
+        {expired
+          ? <Button asChild className="min-h-11 w-full"><Link to="/login" replace>ログインからやり直す</Link></Button>
+          : <SubmitButton pending={form.formState.isSubmitting}>パスワードを設定</SubmitButton>}
       </form>
     </Form>
   );

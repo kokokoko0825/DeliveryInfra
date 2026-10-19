@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   ApiErrorSchema, ArchivesResponseSchema, BroadcastResponseSchema, BroadcastStartRequestSchema, canAccess, canRequestPurpose,
-  CHAT_EVENTS, ChatTokenResponseSchema, CommentSchema, CommentSuspensionRequestSchema, containsNgWord,
+  CHAT_DENY_REASONS, CHAT_EVENTS, ChatTokenResponseSchema, CommentSchema, CommentSuspensionRequestSchema, containsNgWord,
   DeviceNameSchema, DisplayNameSchema, DisplayNameRequestSchema, getPostLoginPath, InviteUsersRequestSchema,
   MeResponseSchema, NgWordSchema, normalizeForModeration, RecentCommentsResponseSchema, ROLE_PURPOSES,
   ROLES, RoleSchema, SlideOrderRequestSchema, SlideUploadSchema, SlideUploadUrlResponseSchema, SlidesResponseSchema,
@@ -56,8 +56,10 @@ describe('shared schemas', () => {
     const archive = { id: 'a1', title: 't', published: false, durationSeconds: 0, playbackPath: '/files/archives/a1/multivariant.m3u8', retainUntil: '2027-10-19T00:00:00.000Z' };
     expect(ArchivesResponseSchema.safeParse([archive]).success).toBe(true);
     expect(ArchivesResponseSchema.safeParse([{ ...archive, playbackPath: 'https://evil.test/x.m3u8' }]).success).toBe(false);
-    const user = { userId: 'u', email: 'a@example.com', loginMethod: 'email', role: 'viewer', enabled: true, commentSuspended: false, lastLoginAt: null };
+    const user = { userId: 'u', email: 'a@example.com', loginMethod: 'email', role: 'viewer', enabled: true, commentSuspended: false, lastLoginAt: null, invitePending: true };
     expect(UsersResponseSchema.safeParse([user]).success).toBe(true);
+    // 招待の再送ボタンの表示に使うので必須（R3-13）
+    expect(UsersResponseSchema.safeParse([{ ...user, invitePending: undefined }]).success).toBe(false);
     // 不正/複数ロールは null（要修復）として返す。未知のロール文字列は拒否する（R2-04）
     expect(UsersResponseSchema.safeParse([{ ...user, role: null }]).success).toBe(true);
     expect(UsersResponseSchema.safeParse([{ ...user, role: 'fake' }]).success).toBe(false);
@@ -72,6 +74,8 @@ describe('shared schemas', () => {
     expect(InviteUsersRequestSchema.safeParse({ emails: [], role: 'admin' }).success).toBe(false);
     expect(UpdateRoleRequestSchema.safeParse({ role: 'fake' }).success).toBe(false);
     expect(CHAT_EVENTS).toEqual(['broadcast-started', 'broadcast-ended', 'slides-updated', 'archives-updated']);
+    // 審査 Lambda と Web が同じ文言で DENY 理由をやり取りする（R4-03）
+    expect(Object.values(CHAT_DENY_REASONS)).toEqual(['表示名を設定してください', 'コメントの送信が停止されています', '使用できない単語が含まれています', 'コメントは3秒に1回まで送信できます']);
   });
   it('validates all role-feature combinations', () => {
     const allowed: Record<string, string[]> = {

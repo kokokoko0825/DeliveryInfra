@@ -57,13 +57,15 @@ content bucket のキー: `slides/<slideId>.pdf`, `archives/<archiveId>/...(HLS)
 
 全エンドポイントでログイン必須。サーバー側でロール検証(5.3)。管理者操作は監査ログ(構造化 JSON, `audit: true`)を出す。
 
+状態を確定した後の Chat イベント送信（SendEvent）は、短いバックオフ（50→100→200ms）で最大3回まで内部再試行する。それでも失敗したら警告ログ（`warning: 'CHAT_EVENT_FAILED'`）を出し、操作自体は成功応答を返す。監査ログは SendEvent より前に出す。通知の欠落は、クライアントのポーリングと再取得で回復する（Review-4 R4-01 / Review-3 R3-14）。
+
 | メソッド パス | ロール | 説明 |
 | --- | --- | --- |
 | GET /api/me | 全員 | `{userId,email,role,loginMethod,displayName|null,commentSuspended}` |
 | PUT /api/me/display-name | 全員 | `{displayName}` 1〜20文字、NGワード不可 |
 | GET /api/broadcast | 全員 | 現在の配信 `{id,title,status:'idle'|'live'|'ended',startedAt,endedAt}` または idle |
 | POST /api/broadcast/start | admin | `{title}`(1〜100) 配信レコード作成 → StartComposition → Chat イベント `broadcast-started` |
-| POST /api/broadcast/stop | admin | StopComposition → 状態 ended → Chat イベント `broadcast-ended` |
+| POST /api/broadcast/stop | admin | StopComposition → 状態 ended → Chat イベント `broadcast-ended`。ended 済みなら状態を変えずに `broadcast-ended` を再送し、監査ログは `broadcast.stop.retry`（R2-03 / R3-14） |
 | GET /api/broadcast/stats | admin | `{viewerCount}`（配信用ステージの CONNECTED subscriber 数） |
 | GET /api/status | admin | ステージ3つ・Chat ルームの存在/状態(F-OPS-02) |
 | POST /api/tokens/stage | 用途別 | `{purpose, deviceName?}` → `{tokens:[{stage,token,participantId,capabilities,expiresAt}], deviceId?}` |
@@ -73,7 +75,7 @@ content bucket のキー: `slides/<slideId>.pdf`, `archives/<archiveId>/...(HLS)
 | POST /api/tokens/chat | 全員 | IVS Chat トークン。停止中ユーザーは SEND_MESSAGE なし。admin は DELETE_MESSAGE/DISCONNECT_USER |
 | GET /api/comments/recent | 全員 | 直近100件（削除済み除外） |
 | DELETE /api/comments/{messageId} | admin | DeleteMessage + 削除フラグ |
-| PUT /api/users/{userId}/comment-suspension | admin | `{suspended:boolean}` 停止時は DisconnectUser |
+| PUT /api/users/{userId}/comment-suspension | admin | `{suspended:boolean}` 停止・解除とも DisconnectUser。本人のクライアントは再接続で `/api/me` と Chat トークンを取り直し、再読み込みなしで送信可否が変わる（R4-02） |
 | GET /api/comments/export | admin | CSV(text/csv, UTF-8 BOM) |
 | GET /api/ng-words / POST /api/ng-words / DELETE /api/ng-words/{word} | admin | NGワード編集 |
 | GET /api/slides | 全員 | 表示順で一覧 |
@@ -87,8 +89,9 @@ content bucket のキー: `slides/<slideId>.pdf`, `archives/<archiveId>/...(HLS)
 | DELETE /api/archives/{id} | admin | S3 プレフィックス削除 |
 | POST /api/files/cookies | 全員 | スライド用 署名付きCookie（Resource `/files/slides/*`、Cookie Path `/files/slides/`、有効1時間） |
 | POST /api/archives/{id}/cookies | 全員 | 当該アーカイブ用 署名付きCookie（Resource `/files/archives/<prefix>/*`、Path 同じ）。非公開は admin のみ（Review-1 R1-08） |
-| GET /api/users | admin | `{userId,email,loginMethod,role,enabled,lastLoginAt}` |
+| GET /api/users | admin | `{userId,email,loginMethod,role,enabled,commentSuspended,lastLoginAt,invitePending}`。`invitePending` は初回パスワード未設定（Cognito `FORCE_CHANGE_PASSWORD`）（R3-13） |
 | POST /api/users/invite | admin | `{emails:string[](1〜100), role}` AdminCreateUser(仮パスワードメール) |
+| POST /api/users/{userId}/resend-invite | admin | 招待の再送。AdminCreateUser `MessageAction: 'RESEND'`（新しい仮パスワードで期限7日も延びる）。初回パスワード設定済みは 409 `INVITE_NOT_PENDING`。A-05 の「招待を再送」ボタン（R3-13） |
 | PUT /api/users/{userId}/role | admin | `{role}` |
 | POST /api/users/{userId}/disable / enable | admin | 無効化時 AdminUserGlobalSignOut |
 | DELETE /api/users/{userId} | admin | |
@@ -108,7 +111,8 @@ content bucket のキー: `slides/<slideId>.pdf`, `archives/<archiveId>/...(HLS)
 
 ### Chat
 - ルーム1つ常設。メッセージ属性 `{displayName}`。審査 Lambda: 本文1〜200文字、NGワード、送信者の3秒連投制限、停止フラグ → DENY。許可時に DynamoDB へ保存。
-- カスタムイベント: `broadcast-started`, `broadcast-ended`, `slides-updated`, `archives-updated`。
+- カスタムイベント: `broadcast-started`, `broadcast-ended`, `slides-updated`, `archives-updated`（shared の `CHAT_EVENTS` / `ChatEventName`）。
+- DENY 理由: 審査 Lambda は `Attributes.Reason` に shared の `CHAT_DENY_REASONS`（表示名を設定してください / コメントの送信が停止されています / 使用できない単語が含まれています / コメントは3秒に1回まで送信できます）を返す。IVS Chat は送信者への 406 の `errorMessage` に理由を含めるので、Web はこの文言で表示を出し分ける。既知の理由がなければ「NGワードを含むか、送信できない内容です」（R4-03）。
 
 ## 6. フロント
 

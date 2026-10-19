@@ -5,6 +5,7 @@ export * from './permissions';
 export * from './moderation';
 
 export const CHAT_EVENTS = ['broadcast-started', 'broadcast-ended', 'slides-updated', 'archives-updated'] as const;
+export type ChatEventName = typeof CHAT_EVENTS[number];
 export const DISPLAY_NAME_MIN = 1;
 export const DISPLAY_NAME_MAX = 20;
 export const COMMENT_MIN = 1;
@@ -58,7 +59,8 @@ export const ArchiveSchema = z.object({ id: z.string(), title: TitleSchema, publ
 export const ArchivesResponseSchema = z.array(ArchiveSchema);
 export const InviteUsersRequestSchema = z.object({ emails: z.array(z.string().email()).min(1).max(100), role: RoleSchema });
 export const UpdateRoleRequestSchema = z.object({ role: RoleSchema });
-export const UsersResponseSchema = z.array(z.object({ userId: z.string(), email: z.string().email(), loginMethod: z.string(), role: RoleSchema.nullable(), enabled: z.boolean(), commentSuspended: z.boolean(), lastLoginAt: z.string().datetime().nullable() }));
+/** invitePending: 招待後に初回パスワードを未設定（Cognito の FORCE_CHANGE_PASSWORD）。招待の再送対象（R3-13）。 */
+export const UsersResponseSchema = z.array(z.object({ userId: z.string(), email: z.string().email(), loginMethod: z.string(), role: RoleSchema.nullable(), enabled: z.boolean(), commentSuspended: z.boolean(), lastLoginAt: z.string().datetime().nullable(), invitePending: z.boolean() }));
 export const ChatTokenResponseSchema = z.object({ token: z.string(), capabilities: z.array(z.string()) });
 export const StatusResponseSchema = z.object({ stages: z.array(z.object({ name: z.string(), exists: z.boolean(), status: z.string().optional() })), chatRoom: z.object({ exists: z.boolean(), status: z.string().optional() }) });
 export const EmptyResponseSchema = z.object({ success: z.boolean() });

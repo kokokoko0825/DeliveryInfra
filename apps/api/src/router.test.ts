@@ -391,17 +391,59 @@ describe('API router endpoint behavior', () => {
     expect(data(await request('admin', 'POST', '/broadcast/stop')).error).toMatchObject({ code: 'BROADCAST_NOT_LIVE' });
   });
 
-  it('resends broadcast-ended on a second stop after the first SendEvent failed (R2-03)', async () => {
+  it('reports the stop as done when SendEvent keeps failing, and resends broadcast-ended on a second stop (R4-01 / R2-03)', async () => {
     const live = { id: 'b-1', title: '大会', status: 'live', compositionArn: 'composition-arn', startedAt: '2026-01-01T00:00:00.000Z' };
-    ddb.on(GetCommand).resolvesOnce({ Item: live }).resolves({ Item: { ...live, status: 'ended', endedAt: '2023-11-14T22:13:20.000Z' } });
-    chat.on(SendEventCommand).rejectsOnce(awsError('ThrottlingException')).resolves({});
-    expect((await request('admin', 'POST', '/broadcast/stop')).statusCode).toBe(500);
+    const ended = { id: 'b-1', title: '大会', status: 'ended', startedAt: '2026-01-01T00:00:00.000Z', endedAt: '2023-11-14T22:13:20.000Z' };
+    ddb.on(GetCommand).resolvesOnce({ Item: live }).resolves({ Item: ended });
+    chat.on(SendEventCommand).rejects(awsError('ThrottlingException'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const first = await request('admin', 'POST', '/broadcast/stop');
+    expect(first.statusCode).toBe(200);
+    expect(data(first)).toEqual(ended);
+    // 初回 + 再試行3回で諦め、警告ログを残す
+    expect(chat.commandCalls(SendEventCommand)).toHaveLength(4);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(warn.mock.calls[0]?.[0]))).toMatchObject({ warning: 'CHAT_EVENT_FAILED', eventName: 'broadcast-ended', name: 'ThrottlingException' });
+    // 監査ログは SendEvent の成否に関係なく残る（R3-14）
+    expect(info.mock.calls.map((call) => JSON.parse(String(call[0])) as { action: string; target?: string })).toEqual([expect.objectContaining({ action: 'broadcast.stop', target: 'b-1' })]);
+    chat.on(SendEventCommand).resolves({});
     const retried = await request('admin', 'POST', '/broadcast/stop');
     expect(retried.statusCode).toBe(200);
-    expect(data(retried)).toEqual({ id: 'b-1', title: '大会', status: 'ended', startedAt: '2026-01-01T00:00:00.000Z', endedAt: '2023-11-14T22:13:20.000Z' });
-    expect(chat.commandCalls(SendEventCommand).map((call) => call.args[0].input.eventName)).toEqual(['broadcast-ended', 'broadcast-ended']);
+    expect(data(retried)).toEqual(ended);
+    expect(chat.commandCalls(SendEventCommand).map((call) => call.args[0].input.eventName)).toEqual(Array(5).fill('broadcast-ended'));
+    expect(info.mock.calls.at(-1)?.[0]).toContain('"action":"broadcast.stop.retry"');
     expect(ivs.commandCalls(StopCompositionCommand)).toHaveLength(1);
     expect(ddb.commandCalls(UpdateCommand)).toHaveLength(1);
+    warn.mockRestore(); info.mockRestore();
+  });
+
+  it('retries a transient SendEvent failure without warning (R4-01)', async () => {
+    chat.on(SendEventCommand).rejectsOnce(awsError('ThrottlingException')).resolves({});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    expect((await request('admin', 'POST', '/broadcast/start', { title: '大会' })).statusCode).toBe(200);
+    expect(chat.commandCalls(SendEventCommand).map((call) => call.args[0].input.eventName)).toEqual(['broadcast-started', 'broadcast-started']);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it.each([
+    ['POST', '/broadcast/start', { title: '大会' }, 'broadcast.start'],
+    ['PUT', '/slides/order', { ids: ['s-1'] }, 'slide.order'],
+    ['DELETE', '/slides/s-1', undefined, 'slide.delete'],
+    ['PATCH', '/archives/a-1', { title: '新しい題' }, 'archive.update'],
+    ['DELETE', '/archives/a-1', undefined, 'archive.delete'],
+  ] as const)('%s %s succeeds and audits even when SendEvent keeps failing (R4-01)', async (method, path, body, action) => {
+    ddb.on(GetCommand, { Key: { PK: 'SLIDE', SK: 's-1' } }).resolves({ Item: { PK: 'SLIDE', SK: 's-1', id: 's-1', key: 'slides/s-1.pdf' } });
+    ddb.on(GetCommand, { Key: { PK: 'ARCHIVE', SK: 'a-1' } }).resolves({ Item: { PK: 'ARCHIVE', SK: 'a-1', id: 'a-1', title: '題', published: false, durationSeconds: 1, recordingPrefix: 'p/a-1', retainUntil: '2040-01-01T00:00:00.000Z' } });
+    chat.on(SendEventCommand).rejects(awsError('ThrottlingException'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const response = await request('admin', method, path, body);
+    expect(response.statusCode).toBe(200);
+    expect(info.mock.calls.some((call) => String(call[0]).includes(`"action":"${action}"`))).toBe(true);
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore(); info.mockRestore();
   });
 
   it('ends the broadcast when the composition already stopped by itself (R1-03)', async () => {
@@ -491,6 +533,11 @@ describe('API router endpoint behavior', () => {
     expect((await request('admin', 'PUT', '/users/u-2/comment-suspension', { suspended: true })).statusCode).toBe(200);
     expect(chat.commandCalls(DisconnectUserCommand)[0]?.args[0].input).toMatchObject({ userId: 'u-2', reason: 'コメント送信停止' });
     expect((await request('admin', 'PUT', '/users/u-2/comment-suspension', { suspended: false })).statusCode).toBe(200);
+    // 解除でも切断し、本人のクライアントに /me とトークンを取り直させる（R4-02）
+    expect(chat.commandCalls(DisconnectUserCommand).map((call) => call.args[0].input)).toEqual([
+      { roomIdentifier: 'room', userId: 'u-2', reason: 'コメント送信停止' },
+      { roomIdentifier: 'room', userId: 'u-2', reason: 'コメント送信停止の解除' },
+    ]);
   });
 
   it('exports CSV with message id, deleted flag, BOM, quotes and formula-injection escaping (R1-15)', async () => {
@@ -724,6 +771,27 @@ describe('user management', () => {
     ]);
   });
 
+  it('resends the invitation only to users who have not set their first password (R3-13)', async () => {
+    cognito.on(ListUsersCommand).resolves({ Users: [{ Username: 'cognito-user', Attributes: [{ Name: 'sub', Value: 'target' }] }] });
+    cognito.on(AdminGetUserCommand).resolves({ Username: 'cognito-user', UserStatus: 'FORCE_CHANGE_PASSWORD' });
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const resent = await request('admin', 'POST', '/users/target/resend-invite');
+    expect(resent.statusCode).toBe(200);
+    expect(data(resent)).toEqual({ success: true });
+    expect(cognito.commandCalls(AdminCreateUserCommand).map((call) => call.args[0].input)).toEqual([{ UserPoolId: 'pool', Username: 'cognito-user', MessageAction: 'RESEND', DesiredDeliveryMediums: ['EMAIL'] }]);
+    expect(info.mock.calls.at(-1)?.[0]).toContain('"action":"user.invite.resend"');
+    cognito.on(AdminGetUserCommand).resolves({ Username: 'cognito-user', UserStatus: 'CONFIRMED' });
+    const confirmed = await request('admin', 'POST', '/users/target/resend-invite');
+    expect(confirmed.statusCode).toBe(409);
+    expect(data(confirmed).error).toEqual({ code: 'INVITE_NOT_PENDING', message: 'このユーザーはすでにパスワードを設定済みです' });
+    expect(cognito.commandCalls(AdminCreateUserCommand)).toHaveLength(1);
+    expect((await request('viewer', 'POST', '/users/target/resend-invite')).statusCode).toBe(403);
+    cognito.on(ListUsersCommand).resolves({ Users: [] });
+    expect((await request('admin', 'POST', '/users/unknown/resend-invite')).statusCode).toBe(404);
+    expect(cognito.commandCalls(AdminCreateUserCommand)).toHaveLength(1);
+    info.mockRestore();
+  });
+
   it.each([
     ['PUT', '/users/user-1/role', { role: 'viewer' }],
     ['POST', '/users/user-1/disable', undefined],
@@ -739,7 +807,7 @@ describe('user management', () => {
 
   it('lists users with one group listing per role and batched DynamoDB reads (R1-24)', async () => {
     cognito.on(ListUsersCommand).resolves({ Users: [
-      { Username: 'c-user', Enabled: true, Attributes: [{ Name: 'sub', Value: 'target' }, { Name: 'email', Value: 'target@example.test' }] },
+      { Username: 'c-user', Enabled: true, UserStatus: 'FORCE_CHANGE_PASSWORD', Attributes: [{ Name: 'sub', Value: 'target' }, { Name: 'email', Value: 'target@example.test' }] },
       { Username: 'okta_x', Enabled: false, Attributes: [{ Name: 'sub', Value: 'okta' }, { Name: 'email', Value: 'okta@example.test' }, { Name: 'identities', Value: '[{"providerName":"Okta"}]' }] },
       { Username: 'multi', Enabled: true, Attributes: [{ Name: 'sub', Value: 'multi' }, { Name: 'email', Value: 'multi@example.test' }] },
     ] });
@@ -747,10 +815,10 @@ describe('user management', () => {
     ddb.on(BatchGetCommand).resolves({ Responses: { table: [{ PK: 'USER#target', SK: 'PROFILE', commentSuspended: true }, { PK: 'USER#target', SK: 'LOGIN', lastLoginAt: '2026-01-01T00:00:00.000Z', loginMethod: 'email' }] } });
     const users = UsersResponseSchema.parse(data(await request('admin', 'GET', '/users')));
     expect(users).toEqual([
-      { userId: 'target', email: 'target@example.test', loginMethod: 'email', role: 'admin', enabled: true, commentSuspended: true, lastLoginAt: '2026-01-01T00:00:00.000Z' },
-      { userId: 'okta', email: 'okta@example.test', loginMethod: 'Okta', role: 'camera', enabled: false, commentSuspended: false, lastLoginAt: null },
+      { userId: 'target', email: 'target@example.test', loginMethod: 'email', role: 'admin', enabled: true, commentSuspended: true, lastLoginAt: '2026-01-01T00:00:00.000Z', invitePending: true },
+      { userId: 'okta', email: 'okta@example.test', loginMethod: 'Okta', role: 'camera', enabled: false, commentSuspended: false, lastLoginAt: null, invitePending: false },
       // 複数ロールは viewer と偽らず要修復（null）として返す（R2-04）
-      { userId: 'multi', email: 'multi@example.test', loginMethod: 'email', role: null, enabled: true, commentSuspended: false, lastLoginAt: null },
+      { userId: 'multi', email: 'multi@example.test', loginMethod: 'email', role: null, enabled: true, commentSuspended: false, lastLoginAt: null, invitePending: false },
     ]);
     expect(cognito.commandCalls(ListUsersInGroupCommand).map((call) => call.args[0].input.GroupName)).toEqual(['admin', 'camera', 'audio', 'presenter', 'viewer']);
     expect(cognito.commandCalls(AdminListGroupsForUserCommand)).toHaveLength(0);

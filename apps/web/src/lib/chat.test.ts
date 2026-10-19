@@ -70,6 +70,12 @@ describe('pure helpers', () => {
     expect(chatErrorMessage({ errorCode: 429, errorMessage: 'x' })).toBe('連投はできません。しばらく待ってから送信してください');
     expect(chatErrorMessage({ errorCode: 403 })).toBe('コメントを送信する権限がありません');
     expect(chatErrorMessage({ errorCode: 406 })).toBe('NGワードを含むか、送信できない内容です');
+    // 審査 Lambda の DENY 理由は errorMessage から出し分ける（R4-03）
+    expect(chatErrorMessage({ errorCode: 406, errorMessage: 'コメントは3秒に1回まで送信できます' })).toBe('コメントは3秒に1回まで送信できます');
+    expect(chatErrorMessage({ errorCode: 406, errorMessage: 'Message rejected: コメントの送信が停止されています' })).toBe('コメントの送信が停止されています');
+    expect(chatErrorMessage({ errorCode: 406, errorMessage: '表示名を設定してください' })).toBe('表示名を設定してください');
+    expect(chatErrorMessage({ errorCode: 406, errorMessage: '使用できない単語が含まれています' })).toBe('使用できない単語が含まれています');
+    expect(chatErrorMessage({ errorCode: 406, errorMessage: 'Unknown reason' })).toBe('NGワードを含むか、送信できない内容です');
     expect(chatErrorMessage({ errorCode: 500, errorMessage: 'boom' })).toBe('送信できませんでした（boom）');
     expect(chatErrorMessage({ errorCode: 500 })).toBe('送信できませんでした');
     expect(chatErrorMessage(new Error('e'))).toBe('e');

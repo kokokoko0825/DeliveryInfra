@@ -36,3 +36,5 @@ export const changeRole = (userId: string, role: Role) =>
 export const setUserEnabled = (userId: string, enabled: boolean) =>
   apiFetch(`${userPath(userId)}/${enabled ? 'enable' : 'disable'}`, { method: 'POST', schema: EmptyResponseSchema });
 export const deleteUser = (userId: string) => apiFetch(userPath(userId), { method: 'DELETE', schema: EmptyResponseSchema });
+/** 初回パスワード未設定のユーザーに招待メールを再送する（新しい仮パスワードで期限も延びる、R3-13）。 */
+export const resendInvite = (userId: string) => apiFetch(`${userPath(userId)}/resend-invite`, { method: 'POST', schema: EmptyResponseSchema });

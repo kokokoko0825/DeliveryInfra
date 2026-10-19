@@ -6,13 +6,33 @@ const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
 vi.mock('sonner', () => ({ toast }));
 const { default: UsersAdminPage } = await import('./UsersAdminPage');
 
-const user = (userId: string, overrides = {}) => ({ userId, email: `${userId}@example.com`, loginMethod: 'email', role: 'viewer', enabled: true, commentSuspended: false, lastLoginAt: '2026-10-19T00:05:00.000Z', ...overrides });
+const user = (userId: string, overrides = {}) => ({ userId, email: `${userId}@example.com`, loginMethod: 'email', role: 'viewer', enabled: true, commentSuspended: false, lastLoginAt: '2026-10-19T00:05:00.000Z', invitePending: false, ...overrides });
 const admin = makeAuth({ me: makeMe({ userId: 'me', role: 'admin' }) });
 const users = [user('me', { role: 'admin' }), user('u1', { loginMethod: 'Okta', lastLoginAt: null }), user('u2', { enabled: false })];
 const emails = () => screen.getByLabelText('メールアドレス');
 const invite = () => fireEvent.click(screen.getByRole('button', { name: '招待する' }));
 const rowOf = (email: string) => screen.getByText(email).closest('tr') as HTMLElement;
 afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); });
+
+describe('UsersAdminPage resend invite (A-05 / R3-13)', () => {
+  it('shows 招待を再送 only for users without a first password and resends the invitation', async () => {
+    const fetchMock = mockApi({ 'GET /api/users': [user('me', { role: 'admin' }), user('pending', { invitePending: true, lastLoginAt: null })], 'POST /api/users/pending/resend-invite': { success: true } });
+    renderPage(<UsersAdminPage />, { auth: admin });
+    const row = await waitFor(() => rowOf('pending@example.com'));
+    expect(within(row).getByText('招待中')).toBeInTheDocument();
+    expect(within(rowOf('me@example.com')).queryByRole('button', { name: '招待を再送' })).not.toBeInTheDocument();
+    fireEvent.click(within(row).getByRole('button', { name: '招待を再送' }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('招待メールを再送しました'));
+    expect(callsTo(fetchMock, 'POST /api/users/pending/resend-invite')).toHaveLength(1);
+  });
+
+  it('shows the API error when the user already set a password', async () => {
+    mockApi({ 'GET /api/users': [user('pending', { invitePending: true })], 'POST /api/users/pending/resend-invite': apiError(409, 'INVITE_NOT_PENDING', 'このユーザーはすでにパスワードを設定済みです') });
+    renderPage(<UsersAdminPage />, { auth: admin });
+    fireEvent.click(await screen.findByRole('button', { name: '招待を再送' }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('このユーザーはすでにパスワードを設定済みです'));
+  });
+});
 
 describe('UsersAdminPage invite (A-05)', () => {
   it('validates email format and shows counts', async () => {

@@ -71,11 +71,20 @@ export function redirectErrorMessage(error: unknown): string {
   return 'Okta でログインできませんでした。時間をおいて再度お試しください';
 }
 
+/**
+ * 初回パスワード設定の認証セッション（3分）切れ。Cognito は NotAuthorizedException（Invalid session for the user, session is expired.）を返す（R4-04）。
+ */
+export const isAuthSessionExpired = (error: unknown): boolean =>
+  error instanceof Error && error.name === 'NotAuthorizedException' && /session is expired|Invalid session/i.test(error.message);
+
 /** Amplify(Cognito) のエラーを日本語にする。 */
 export function authErrorMessage(error: unknown): string {
   const name = error instanceof Error ? error.name : '';
   const message = error instanceof Error ? error.message : '';
   if (/attempts exceeded/i.test(message)) return 'ログイン試行回数の上限に達しました。しばらく待ってから再度お試しください';
+  // 仮パスワードの期限（7日）切れ。確認コードでの再設定もできないので、管理者の再送に誘導する（R3-13）
+  if (name === 'NotAuthorizedException' && /temporary password has expired/i.test(message)) return '仮パスワードの有効期限が切れています。管理者に招待の再送を依頼してください';
+  if (isAuthSessionExpired(error)) return '時間が経過したため、もう一度ログインからやり直してください';
   switch (name) {
     case 'NotAuthorizedException':
     case 'UserNotFoundException':

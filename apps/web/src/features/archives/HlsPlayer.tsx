@@ -10,6 +10,11 @@ export function canPlayNativeHls(video: HTMLVideoElement): boolean {
 /** 再生が進まないまま Cookie の取り直しで復帰を試みる上限回数。 */
 export const MAX_RECOVERIES = 3;
 const FAILED = '再生中にエラーが発生しました。ページを再読み込みしてください';
+/**
+ * ネイティブ HLS で Cookie の取り直しを試す MediaError のコード（MEDIA_ERR_NETWORK / MEDIA_ERR_SRC_NOT_SUPPORTED）。
+ * Safari は 403 の playlist を SRC_NOT_SUPPORTED で返すことがある。DECODE（壊れたセグメント）は取り直しても直らない（R4-05）。
+ */
+const RECOVERABLE_MEDIA_ERRORS: readonly number[] = [2, 4];
 
 /**
  * アーカイブ再生。ダウンロード不可（controlsList=nodownload・右クリック抑止）。
@@ -38,8 +43,9 @@ export function HlsPlayer({ src, title, refreshCookies }: { src: string; title: 
     };
 
     if (canPlayNativeHls(video)) {
-      // ネイティブ HLS は失敗の理由が取れないので、video の error で一律に取り直して src を張り直す
-      const onError = () => recover(() => {
+      // ネイティブ HLS は HTTP の状態が取れないので、回線・読み込みのエラーだけ Cookie を取り直して src を張り直す
+      let stalledAt = 0;
+      const reload = () => {
         const position = video.currentTime;
         const wasPlaying = !video.paused;
         video.addEventListener('loadedmetadata', () => {
@@ -48,15 +54,21 @@ export function HlsPlayer({ src, title, refreshCookies }: { src: string; title: 
         }, { once: true });
         video.src = src;
         video.load();
-      });
-      const onPlaying = () => { recoveries = 0; };
+      };
+      const onError = () => {
+        if (!RECOVERABLE_MEDIA_ERRORS.includes(video.error?.code ?? 0)) { setError(FAILED); return; }
+        stalledAt = video.currentTime;
+        recover(reload);
+      };
+      // 同じ位置で再生開始 → エラーを繰り返すと回数が戻り続けるので、止まった位置より先に進んだときだけ数え直す（R4-05）
+      const onTimeUpdate = () => { if (video.currentTime > stalledAt) recoveries = 0; };
       video.addEventListener('error', onError);
-      video.addEventListener('playing', onPlaying);
+      video.addEventListener('timeupdate', onTimeUpdate);
       video.src = src;
       return () => {
         disposed = true;
         video.removeEventListener('error', onError);
-        video.removeEventListener('playing', onPlaying);
+        video.removeEventListener('timeupdate', onTimeUpdate);
         video.removeAttribute('src');
         video.load();
       };

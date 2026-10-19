@@ -26,6 +26,8 @@ let world: World;
 /** サインイン: Cognito が PostAuthentication トリガーを呼んだ後、SPA がアクセストークンを受け取る。 */
 async function login(email: string): Promise<string> {
   const user = world.cognito.byEmail(email);
+  // 招待ユーザーは初回パスワードを設定してからログインする
+  user.status = 'CONFIRMED';
   await cognitoHandler({
     userPoolId: ENV.USER_POOL_ID, userName: user.username, triggerSource: 'PostAuthentication_Authentication',
     request: { userAttributes: { sub: user.sub, email: user.email, ...(user.identities ? { identities: user.identities } : {}) } }, response: {},
@@ -84,10 +86,18 @@ describe('ユーザー招待 → ロール変更 → ステージトークン(�
 
     const cam = world.cognito.byEmail('cam@example.com');
     expect([...cam.groups]).toEqual(['viewer']);
+    // 初回パスワード未設定のユーザーは一覧で招待中になり、招待を再送できる(R3-13)。
+    const pending = UsersResponseSchema.parse((await api('GET', '/users', { token: admin })).json);
+    expect(pending.find((user) => user.userId === cam.sub)).toMatchObject({ invitePending: true });
+    expect((await api('POST', `/users/${cam.sub}/resend-invite`, { token: admin })).json).toEqual({ success: true });
+    expect(world.cognito.resent).toEqual([cam.username]);
     // ログイン(PostAuthentication)で最終ログインが記録され、ユーザー一覧に出る。
     const viewerToken = await login('cam@example.com');
     const users = UsersResponseSchema.parse((await api('GET', '/users', { token: admin })).json);
-    expect(users.find((user) => user.userId === cam.sub)).toEqual({ userId: cam.sub, email: 'cam@example.com', loginMethod: 'email', role: 'viewer', enabled: true, commentSuspended: false, lastLoginAt: new Date(T0).toISOString() });
+    expect(users.find((user) => user.userId === cam.sub)).toEqual({ userId: cam.sub, email: 'cam@example.com', loginMethod: 'email', role: 'viewer', enabled: true, commentSuspended: false, lastLoginAt: new Date(T0).toISOString(), invitePending: false });
+    // パスワード設定済みのユーザーには再送しない。
+    expect(errorCode(await api('POST', `/users/${cam.sub}/resend-invite`, { token: admin }))).toBe('INVITE_NOT_PENDING');
+    expect(world.cognito.resent).toEqual([cam.username]);
     // アクセストークンに email は無いが、/api/me は Cognito 側の値で補って返す(R1-01)。
     expect(MeResponseSchema.parse((await api('GET', '/me', { token: viewerToken })).json)).toMatchObject({ userId: cam.sub, email: 'cam@example.com', role: 'viewer', loginMethod: 'email' });
 
@@ -310,11 +320,14 @@ describe('配信 start → stats → stop → 録画イベント → アーカ�
     const adminAgain = await login('admin@example.com');
     const viewerAgain = await login('viewer@example.com');
     const endedEvents = () => world.chat.events.filter((event) => event.eventName === 'broadcast-ended').length;
-    // 1回目の停止は ended に更新した後の SendEvent が一時障害で失敗する。
-    world.chat.failNextSends();
-    expect((await api('POST', '/broadcast/stop', { token: adminAgain, body: {} })).statusCode).toBe(500);
-    expect(endedEvents()).toBe(0);
+    // 1回目の停止は ended に更新した後の SendEvent が内部再試行(3回)を含めて失敗する。
+    // 停止自体は確定しているので 200 を返す(R4-01)。
+    world.chat.failNextSends(4);
     const endedAt = new Date(Date.now()).toISOString();
+    const firstStop = await api('POST', '/broadcast/stop', { token: adminAgain, body: {} });
+    expect(firstStop.statusCode).toBe(200);
+    expect(BroadcastSchema.parse(firstStop.json)).toMatchObject({ id: broadcast.id, status: 'ended', endedAt });
+    expect(endedEvents()).toBe(0);
     // 再試行は ended 済みでも 200 で、endedAt は変えずに broadcast-ended を再送する(R2-03)。
     const retried = await api('POST', '/broadcast/stop', { token: adminAgain, body: {} });
     expect(retried.statusCode).toBe(200);
@@ -433,6 +446,11 @@ describe('コメント審査 → 直近100件 → 削除 → CSV', () => {
     expect((await api('POST', '/tokens/chat', { token: hanakoToken, body: {} })).json).toEqual({ token: expect.any(String), capabilities: [] });
     expect((await api('POST', '/tokens/chat', { token: admin, body: {} })).json).toMatchObject({ capabilities: ['SEND_MESSAGE', 'DELETE_MESSAGE', 'DISCONNECT_USER'] });
     expect(MeResponseSchema.parse((await api('GET', '/me', { token: hanakoToken })).json).commentSuspended).toBe(true);
+    // 解除しても切断し、本人は再接続で /me と送信権限付きのトークンを取り直す(R4-02)。
+    expect((await api('PUT', `/users/${hanako.sub}/comment-suspension`, { token: admin, body: { suspended: false } })).json).toEqual({ success: true });
+    expect(world.chat.disconnected).toEqual([hanako.sub, hanako.sub]);
+    expect(MeResponseSchema.parse((await api('GET', '/me', { token: hanakoToken })).json).commentSuspended).toBe(false);
+    expect((await api('POST', '/tokens/chat', { token: hanakoToken, body: {} })).json).toEqual({ token: expect.any(String), capabilities: ['SEND_MESSAGE'] });
 
     for (let n = 0; n < 105; n += 1) {
       advance(3_001);

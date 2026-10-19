@@ -8,7 +8,7 @@ const download = vi.hoisted(() => ({ saveBlob: vi.fn() }));
 vi.mock('@/lib/download', () => download);
 const { default: CommentsAdminPage } = await import('./CommentsAdminPage');
 
-const user = (userId: string, commentSuspended: boolean) => ({ userId, email: `${userId}@example.com`, loginMethod: 'email', role: 'viewer', enabled: true, commentSuspended, lastLoginAt: null });
+const user = (userId: string, commentSuspended: boolean) => ({ userId, email: `${userId}@example.com`, loginMethod: 'email', role: 'viewer', enabled: true, commentSuspended, lastLoginAt: null, invitePending: false });
 const admin = makeAuth({ me: makeMe({ role: 'admin' }) });
 const base = { 'GET /api/users': [user('u1', true), user('u2', false)], 'GET /api/ng-words': ['ばか'] };
 afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); });

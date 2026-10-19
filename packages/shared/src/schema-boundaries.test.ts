@@ -97,7 +97,7 @@ describe('shared contract boundary schemas', () => {
     expect(InviteUsersRequestSchema.safeParse({ emails: ['a@example.test'], role: 'viewer' }).success).toBe(true);
     expect(InviteUsersRequestSchema.safeParse({ emails: ['bad-address'], role: 'viewer' }).success).toBe(false);
     expect(UserInviteResponseSchema.safeParse({ invited: ['a@example.test'], failed: [] }).success).toBe(true);
-    expect(UsersResponseSchema.safeParse([{ userId: 'u1', email: 'a@example.test', loginMethod: 'email', role: null, enabled: true, commentSuspended: false, lastLoginAt: null }]).success).toBe(true);
+    expect(UsersResponseSchema.safeParse([{ userId: 'u1', email: 'a@example.test', loginMethod: 'email', role: null, enabled: true, commentSuspended: false, lastLoginAt: null, invitePending: false }]).success).toBe(true);
     expect(UserUpdateResponseSchema.safeParse({ userId: 'u1', role: 'camera', enabled: true }).success).toBe(true);
     expect(UserUpdateResponseSchema.safeParse({ userId: 'u1', role: 'invalid', enabled: true }).success).toBe(false);
   });

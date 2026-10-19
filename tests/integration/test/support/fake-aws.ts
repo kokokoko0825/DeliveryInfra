@@ -29,12 +29,15 @@ const GROUPS = ['admin', 'camera', 'audio', 'presenter', 'viewer'];
 const awsError = (name: string, message = name) => Object.assign(new Error(message), { name, $metadata: { httpStatusCode: 400 } });
 const b64url = (value: string | Buffer) => Buffer.from(value).toString('base64url');
 
-interface CognitoUser { username: string; sub: string; email: string; enabled: boolean; groups: Set<string>; identities?: string }
+/** status: 招待直後は FORCE_CHANGE_PASSWORD、初回パスワードを設定すると CONFIRMED。 */
+interface CognitoUser { username: string; sub: string; email: string; enabled: boolean; groups: Set<string>; identities?: string; status: 'FORCE_CHANGE_PASSWORD' | 'CONFIRMED' }
 
 /** Cognito User Pool(ユーザー・グループ)と、そのプールが発行するアクセストークン(RS256 署名)のフェイク。 */
 export class FakeCognito {
   readonly users = new Map<string, CognitoUser>();
   readonly signedOut: string[] = [];
+  /** MessageAction: RESEND で招待を再送したユーザー名。 */
+  readonly resent: string[] = [];
   private readonly keys = generateKeyPairSync('rsa', { modulusLength: 2048 });
   private readonly kid = 'integration-key';
 
@@ -56,7 +59,7 @@ export class FakeCognito {
   seed(email: string, groups: string[], okta = false): CognitoUser {
     const sub = randomUUID();
     const username = okta ? `okta_${sub.slice(0, 8)}` : sub;
-    const user: CognitoUser = { username, sub, email, enabled: true, groups: new Set(groups), ...(okta ? { identities: JSON.stringify([{ providerName: 'Okta', providerType: 'OIDC', userId: sub }]) } : {}) };
+    const user: CognitoUser = { username, sub, email, enabled: true, groups: new Set(groups), status: 'CONFIRMED', ...(okta ? { identities: JSON.stringify([{ providerName: 'Okta', providerType: 'OIDC', userId: sub }]) } : {}) };
     this.users.set(username, user);
     return user;
   }
@@ -70,7 +73,7 @@ export class FakeCognito {
     this.pool(input.UserPoolId);
     const user = this.users.get(input.Username ?? '') ?? [...this.users.values()].find((candidate) => candidate.email === input.Username);
     if (!user) throw awsError('UserNotFoundException', 'User does not exist.');
-    return { Username: user.username, Enabled: user.enabled, UserStatus: 'CONFIRMED' as const, UserAttributes: this.attributes(user) };
+    return { Username: user.username, Enabled: user.enabled, UserStatus: user.status, UserAttributes: this.attributes(user) };
   }
 
   listUsersInGroup(input: ListUsersInGroupCommand['input']) {
@@ -114,12 +117,19 @@ export class FakeCognito {
 
   adminCreateUser(input: AdminCreateUserCommand['input']) {
     this.pool(input.UserPoolId);
+    if (input.MessageAction === 'RESEND') {
+      // 再送は既存ユーザー名で呼ぶ。パスワード設定済みのユーザーには再送できない
+      const user = this.user(input.Username);
+      if (user.status !== 'FORCE_CHANGE_PASSWORD') throw awsError('UnsupportedUserStateException', 'Resend not possible.');
+      this.resent.push(user.username);
+      return { User: { Username: user.username, Enabled: user.enabled, UserStatus: user.status, Attributes: this.attributes(user) } };
+    }
     const email = input.UserAttributes?.find((attribute) => attribute.Name === 'email')?.Value;
     if (!email || input.Username !== email) throw awsError('InvalidParameterException', 'email alias required');
     if ([...this.users.values()].some((user) => user.email === email)) throw awsError('UsernameExistsException', 'An account with the given email already exists.');
     // email をサインインエイリアスにしたプールでは Username は sub(UUID)になる。
     const sub = randomUUID();
-    this.users.set(sub, { username: sub, sub, email, enabled: true, groups: new Set() });
+    this.users.set(sub, { username: sub, sub, email, enabled: true, groups: new Set(), status: 'FORCE_CHANGE_PASSWORD' });
     return { User: { Username: sub, Enabled: true, UserStatus: 'FORCE_CHANGE_PASSWORD' as const, Attributes: [{ Name: 'sub', Value: sub }, { Name: 'email', Value: email }] } };
   }
 
@@ -154,7 +164,7 @@ export class FakeCognito {
     const limit = input.Limit ?? 60;
     const page = users.slice(start, start + limit);
     return {
-      Users: page.map((user) => ({ Username: user.username, Enabled: user.enabled, Attributes: this.attributes(user) })),
+      Users: page.map((user) => ({ Username: user.username, Enabled: user.enabled, UserStatus: user.status, Attributes: this.attributes(user) })),
       ...(start + limit < users.length ? { PaginationToken: String(start + limit) } : {}),
     };
   }

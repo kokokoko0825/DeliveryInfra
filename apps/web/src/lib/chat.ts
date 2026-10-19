@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChatRoom, SendMessageRequest, type ChatMessage } from 'amazon-ivs-chat-messaging';
-import { CHAT_EVENTS, COMMENT_HISTORY_LIMIT, ChatTokenResponseSchema, RecentCommentsResponseSchema, type Comment } from '@delivery/shared';
+import { CHAT_DENY_REASONS, CHAT_EVENTS, COMMENT_HISTORY_LIMIT, ChatTokenResponseSchema, RecentCommentsResponseSchema, type ChatEventName, type Comment } from '@delivery/shared';
 import { apiFetch } from './api';
 import { backoffMs } from './retry';
 
-export type ChatEventName = typeof CHAT_EVENTS[number];
+export type { ChatEventName };
 export type ChatConnection = 'connecting' | 'connected' | 'disconnected';
 
 export const isChatEventName = (name: string): name is ChatEventName => (CHAT_EVENTS as readonly string[]).includes(name);
@@ -47,7 +47,8 @@ export function chatErrorMessage(error: unknown): string {
     const { errorCode, errorMessage } = error as { errorCode: number; errorMessage?: string };
     if (errorCode === 429) return '連投はできません。しばらく待ってから送信してください';
     if (errorCode === 403) return 'コメントを送信する権限がありません';
-    if (errorCode === 406) return 'NGワードを含むか、送信できない内容です';
+    // 審査 Lambda の DENY 理由は errorMessage に入る。既知の理由ならそのまま出す（R4-03）
+    if (errorCode === 406) return Object.values(CHAT_DENY_REASONS).find((reason) => errorMessage?.includes(reason)) ?? 'NGワードを含むか、送信できない内容です';
     return errorMessage ? `送信できませんでした（${errorMessage}）` : '送信できませんでした';
   }
   return error instanceof Error ? error.message : '送信できませんでした';

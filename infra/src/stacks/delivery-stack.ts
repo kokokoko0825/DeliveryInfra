@@ -371,10 +371,8 @@ export class DeliveryStack extends Stack {
         resources: [broadcastStage.attrArn, encoder.attrArn, storage.attrArn, compositionArn],
       }),
     );
-    apiFn.addToRolePolicy(
-      new iam.PolicyStatement({ actions: ['ivs:StopComposition', 'ivs:GetComposition'], resources: [compositionArn] }),
-    );
-    apiFn.addToRolePolicy(new iam.PolicyStatement({ actions: ['ivs:ListCompositions'], resources: ['*'] }));
+    // GetComposition は recording Lambda だけが使い、ListCompositions はどこからも使わない（R4-07）
+    apiFn.addToRolePolicy(new iam.PolicyStatement({ actions: ['ivs:StopComposition'], resources: [compositionArn] }));
     apiFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['ivschat:CreateChatToken', 'ivschat:SendEvent', 'ivschat:DeleteMessage', 'ivschat:DisconnectUser', 'ivschat:GetRoom'],
@@ -383,8 +381,9 @@ export class DeliveryStack extends Stack {
     );
     apiFn.addToRolePolicy(
       new iam.PolicyStatement({
+        // CSV エクスポートは応答本文で返すので S3 を使わない（R4-07）
         actions: ['s3:PutObject', 's3:GetObject', 's3:DeleteObject'],
-        resources: [contentBucket.arnForObjects('slides/*'), contentBucket.arnForObjects('comment-exports/*')],
+        resources: [contentBucket.arnForObjects('slides/*')],
       }),
     );
     apiFn.addToRolePolicy(

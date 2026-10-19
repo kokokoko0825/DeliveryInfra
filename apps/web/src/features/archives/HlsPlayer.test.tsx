@@ -125,26 +125,56 @@ describe('HlsPlayer (hls.js)', () => {
 });
 
 describe('HlsPlayer (Safari native HLS)', () => {
-  it('reloads the source at the same position after refreshing cookies on a video error (R3-03)', async () => {
+  /** video の MediaError（2: NETWORK、3: DECODE、4: SRC_NOT_SUPPORTED）を設定して error を発火する。 */
+  const fail = (video: HTMLVideoElement, code: number) => {
+    Object.defineProperty(video, 'error', { value: { code }, configurable: true });
+    act(() => { video.dispatchEvent(new Event('error')); });
+  };
+  const at = (video: HTMLVideoElement, initial: number) => {
+    let time = initial;
+    Object.defineProperty(video, 'currentTime', { get: () => time, set: (value: number) => { time = value; }, configurable: true });
+    return { get: () => time, set: (value: number) => { time = value; } };
+  };
+
+  it('reloads the source at the same position after refreshing cookies on a network error (R3-03)', async () => {
     nativeHls = true;
     const refreshCookies = vi.fn().mockResolvedValue(undefined);
     render(<HlsPlayer src="https://cdn.example/a.m3u8" title="定例会" refreshCookies={refreshCookies} />);
     const video = screen.getByLabelText<HTMLVideoElement>('定例会');
     expect(video.src).toBe('https://cdn.example/a.m3u8');
     expect(hls.instances).toHaveLength(0);
-    let time = 600;
-    Object.defineProperty(video, 'currentTime', { get: () => time, set: (value: number) => { time = value; }, configurable: true });
+    const time = at(video, 600);
     Object.defineProperty(video, 'paused', { value: false, configurable: true });
     video.removeAttribute('src');
-    act(() => { video.dispatchEvent(new Event('error')); });
+    fail(video, 2);
     expect(refreshCookies).toHaveBeenCalledTimes(1);
     await flush();
     expect(video.src).toBe('https://cdn.example/a.m3u8');
     expect(HTMLMediaElement.prototype.load).toHaveBeenCalled();
-    time = 0;
+    time.set(0);
     act(() => { video.dispatchEvent(new Event('loadedmetadata')); });
-    expect(time).toBe(600);
+    expect(time.get()).toBe(600);
     expect(HTMLMediaElement.prototype.play).toHaveBeenCalled();
+  });
+
+  it('also recovers from SRC_NOT_SUPPORTED, which Safari reports for a 403 playlist', async () => {
+    nativeHls = true;
+    const refreshCookies = vi.fn().mockResolvedValue(undefined);
+    render(<HlsPlayer src="https://cdn.example/a.m3u8" title="定例会" refreshCookies={refreshCookies} />);
+    fail(screen.getByLabelText<HTMLVideoElement>('定例会'), 4);
+    await flush();
+    expect(refreshCookies).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(FAILED)).not.toBeInTheDocument();
+  });
+
+  it('shows the error without refreshing cookies on a decode error (R4-05)', async () => {
+    nativeHls = true;
+    const refreshCookies = vi.fn().mockResolvedValue(undefined);
+    render(<HlsPlayer src="https://cdn.example/a.m3u8" title="定例会" refreshCookies={refreshCookies} />);
+    fail(screen.getByLabelText<HTMLVideoElement>('定例会'), 3);
+    await flush();
+    expect(refreshCookies).not.toHaveBeenCalled();
+    expect(screen.getByText(FAILED)).toBeInTheDocument();
   });
 
   it('shows the error after repeated native failures', async () => {
@@ -152,23 +182,41 @@ describe('HlsPlayer (Safari native HLS)', () => {
     render(<HlsPlayer src="https://cdn.example/a.m3u8" title="定例会" refreshCookies={vi.fn().mockResolvedValue(undefined)} />);
     const video = screen.getByLabelText<HTMLVideoElement>('定例会');
     for (let i = 0; i <= MAX_RECOVERIES; i += 1) {
-      act(() => { video.dispatchEvent(new Event('error')); });
+      fail(video, 2);
       await flush();
     }
     expect(screen.getByText(FAILED)).toBeInTheDocument();
   });
 
-  it('counts afresh once playback resumes', async () => {
+  it('keeps counting when playback restarts at the failing position and fails again (R4-05)', async () => {
     nativeHls = true;
     const refreshCookies = vi.fn().mockResolvedValue(undefined);
     render(<HlsPlayer src="https://cdn.example/a.m3u8" title="定例会" refreshCookies={refreshCookies} />);
     const video = screen.getByLabelText<HTMLVideoElement>('定例会');
+    at(video, 120);
+    for (let i = 0; i <= MAX_RECOVERIES; i += 1) {
+      fail(video, 2);
+      await flush();
+      act(() => { video.dispatchEvent(new Event('playing')); });
+      act(() => { video.dispatchEvent(new Event('timeupdate')); });
+    }
+    expect(refreshCookies).toHaveBeenCalledTimes(MAX_RECOVERIES);
+    expect(screen.getByText(FAILED)).toBeInTheDocument();
+  });
+
+  it('counts afresh once playback moves past the failing position', async () => {
+    nativeHls = true;
+    const refreshCookies = vi.fn().mockResolvedValue(undefined);
+    render(<HlsPlayer src="https://cdn.example/a.m3u8" title="定例会" refreshCookies={refreshCookies} />);
+    const video = screen.getByLabelText<HTMLVideoElement>('定例会');
+    const time = at(video, 120);
     for (let i = 0; i < MAX_RECOVERIES; i += 1) {
-      act(() => { video.dispatchEvent(new Event('error')); });
+      fail(video, 2);
       await flush();
     }
-    act(() => { video.dispatchEvent(new Event('playing')); });
-    act(() => { video.dispatchEvent(new Event('error')); });
+    time.set(121);
+    act(() => { video.dispatchEvent(new Event('timeupdate')); });
+    fail(video, 2);
     await flush();
     expect(refreshCookies).toHaveBeenCalledTimes(MAX_RECOVERIES + 1);
     expect(screen.queryByText(FAILED)).not.toBeInTheDocument();

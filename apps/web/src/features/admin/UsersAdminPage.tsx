@@ -2,7 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { ROLES, type INVITE_FAILURE_REASONS, type Role, type UserInviteResponse } from '@delivery/shared';
-import { CircleAlert, Loader2, Trash2, UserPlus } from 'lucide-react';
+import { CircleAlert, Loader2, Send, Trash2, UserPlus } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -21,7 +21,7 @@ import { errorMessage } from '@/lib/api';
 import { formatDateTime } from '@/lib/format';
 import { queryKeys } from '@/lib/query-keys';
 import { parseEmailCsv, parseEmailList } from '@/lib/validation';
-import { changeRole, deleteUser, fetchUsers, inviteUsers, setUserEnabled } from './users-api';
+import { changeRole, deleteUser, fetchUsers, inviteUsers, resendInvite, setUserEnabled } from './users-api';
 
 function RoleSelect({ id, value, onChange, disabled, label }: { id?: string; value: Role | null; onChange: (role: Role) => void; disabled?: boolean; label?: string }) {
   return (
@@ -137,6 +137,7 @@ function UsersTable() {
   const role = useMutation({ mutationFn: (v: { userId: string; role: Role }) => changeRole(v.userId, v.role), onSuccess: () => { toast.success('ロールを変更しました'); return refresh(); }, onError });
   const enabled = useMutation({ mutationFn: (v: { userId: string; enabled: boolean }) => setUserEnabled(v.userId, v.enabled), onSuccess: refresh, onError });
   const remove = useMutation({ mutationFn: deleteUser, onSuccess: () => { toast.success('ユーザーを削除しました'); return refresh(); }, onError });
+  const resend = useMutation({ mutationFn: resendInvite, onSuccess: () => { toast.success('招待メールを再送しました'); }, onError });
 
   if (users.isPending) return <LoadingView />;
   if (users.error) return <ErrorText message={errorMessage(users.error)} />;
@@ -163,9 +164,19 @@ function UsersTable() {
                 </div>
               </TableCell>
               <TableCell>{user.lastLoginAt ? formatDateTime(user.lastLoginAt) : '—'}</TableCell>
-              <TableCell><Badge variant={user.enabled ? 'secondary' : 'outline'}>{user.enabled ? '有効' : '無効'}</Badge></TableCell>
+              <TableCell>
+                <div className="flex flex-wrap gap-1">
+                  <Badge variant={user.enabled ? 'secondary' : 'outline'}>{user.enabled ? '有効' : '無効'}</Badge>
+                  {user.invitePending && <Badge variant="outline">招待中</Badge>}
+                </div>
+              </TableCell>
               <TableCell>
                 <div className="flex gap-1">
+                  {user.invitePending && (
+                    <Button variant="outline" className="min-h-11" disabled={resend.isPending} onClick={() => resend.mutate(user.userId)}>
+                      <Send aria-hidden />招待を再送
+                    </Button>
+                  )}
                   {user.enabled ? (
                     <ConfirmAction
                       trigger={<Button variant="outline" className="min-h-11" disabled={self}>無効化</Button>}
@@ -192,7 +203,7 @@ function UsersTable() {
 export default function UsersAdminPage() {
   return (
     <div className="space-y-6">
-      <PageHeader title="ユーザー管理" description="メールユーザーの招待、ロール変更、無効化・削除を行います。" />
+      <PageHeader title="ユーザー管理" description="メールユーザーの招待・招待の再送、ロール変更、無効化・削除を行います。" />
       <InviteForm />
       <Card>
         <CardHeader><CardTitle><h2>ユーザー一覧</h2></CardTitle></CardHeader>
