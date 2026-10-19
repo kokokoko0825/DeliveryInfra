@@ -32,9 +32,9 @@
 
 `recordingPrefix` 属性は**アーカイブ行だけ**が持つ（Infra の Stream フィルタ条件）。配信・Composition 行では同じ値を `outputPrefix` として持つ。
 
-端末枠は種類ごとの固定スロットを条件付き `PutItem`（`ReturnValues: ALL_OLD`）で取得する。条件は `attribute_not_exists(PK) OR ttl <= 現在時刻`。同じ枠を同時取得できないため上限を超えない。期限は45秒で、送信中は15秒間隔のハートビートで延長する。失効した枠を再利用するときは、旧枠の `participantId` を `DisconnectParticipant` で切断してから使う（R1-07。`ResourceNotFoundException` は切断済みとして扱い、それ以外の失敗は取得を取り消す）。camera/mic で稼働中の同名端末があれば、他人なら 409 `DEVICE_NAME_IN_USE`、本人なら再接続としてその枠を置き換える（R1-18）。switcher は枠を使わない（R1-02）。
+端末枠は種類ごとの固定スロットを条件付き `PutItem`（`ReturnValues: ALL_OLD`）で取得する。条件は `attribute_not_exists(PK) OR ttl <= 現在時刻`。同じ枠を同時取得できないため上限を超えない。期限は45秒で、送信中は15秒間隔のハートビートで延長する。失効した枠を再利用するときは、旧枠の `participantId` を `DisconnectParticipant` で切断してから使う（R1-07。`ResourceNotFoundException` は切断済みとして扱う。それ以外の失敗では旧参加者が接続したままなので、`ALL_OLD` の旧枠行を `deviceId = 新しい deviceId` 条件付きで書き戻し、他端末の新規取得は上書きしない。R2-01）。camera/mic で稼働中の同名端末があれば、他人なら 409 `DEVICE_NAME_IN_USE`、本人なら再接続としてその枠を置き換える（R1-18）。switcher は枠を使わない（R1-02）。
 
-IVS Composition の録画先 prefix は `StartComposition` 応答から `outputPrefix` として保存し、EventBridge の `Session End` / `Session Failure` でアーカイブ行の `recordingPrefix` に記録する。HLS は `RECORDING_BUCKET` 内の `<recordingPrefix>/media/hls/multivariant.m3u8` にあり、視聴パスは `/files/archives/<recordingPrefix>/media/hls/multivariant.m3u8`。同じイベントで `BROADCAST/CURRENT` の `compositionArn` が一致し `live` なら `ended` にして `broadcast-ended` を送る（R1-03）。スライドはコンテンツバケットの `slides/<id>.pdf` に保存し、配信パスは `/files/slides/<id>.pdf`。
+IVS Composition の録画先 prefix は `StartComposition` 応答から `outputPrefix` として保存し、EventBridge の `Session End` / `Session Failure` でアーカイブ行の `recordingPrefix` に記録する。HLS は `RECORDING_BUCKET` 内の `<recordingPrefix>/media/hls/multivariant.m3u8` にあり、視聴パスは `/files/archives/<recordingPrefix>/media/hls/multivariant.m3u8`。同じイベントで `BROADCAST/CURRENT` の `compositionArn` が一致し `live` なら `ended` にして `broadcast-ended` を送る（R1-03）。再試行時に同じ Composition で既に `ended` なら `broadcast-ended` を再送する。`POST /api/broadcast/stop` も `ended` 済みなら状態を変えずに `broadcast-ended` を再送して 200 を返す。クライアントは重複イベントを許容する（再取得するだけ、R2-03）。スライドはコンテンツバケットの `slides/<id>.pdf` に保存し、配信パスは `/files/slides/<id>.pdf`。
 
 ### アーカイブの保存期限（R1-22）
 
@@ -95,3 +95,8 @@ Cognitoトリガーは `PostConfirmation_ConfirmSignUp` で外部IdPユーザー
 ## Mutation test result (2026-10-19)
 
 `pnpm --filter api mutation` was run with the configured break threshold of 80. It failed at **17.61%** (206 killed, 289 survived, 675 not covered, 446 errors among 1,616 mutants). The largest gap is route coverage: current `router.test.ts` focuses on authentication, role rejection, display-name/PDF boundaries, and device limits; other endpoint branches are not exercised by the suite and therefore generate many no-coverage mutants. Surviving mutants also include user-visible error-message string substitutions, which the current tests assert by error code rather than exact Japanese wording, and token response mutations not asserted by current tests. The API behavior is implemented, but mutation acceptance remains incomplete and needs expanded endpoint tests plus assertions for the surviving behavior.
+
+## Review-2 対応（ユーザー管理）
+
+- `POST /api/users/invite`: `AdminCreateUser` 後の `AdminAddUserToGroup` が失敗したら `AdminDeleteUser` で作成を取り消し `FAILED` を返す（再招待可能）。取り消しも失敗したら `CREATED_WITHOUT_ROLE` を返し、監査ログ `user.invite.created_without_role` を残す。画面はこのアドレスを再送欄に残さず、一覧のロール変更で修復させる（R2-02）。
+- `GET /api/users`: 有効ロールがちょうど1つでないユーザー（ロールなし・複数）は `role: null` を返す。画面は「ロール要修復」を表示し、ロール変更（既存ロールを全て外して付け直す）で修復する（R2-04）。

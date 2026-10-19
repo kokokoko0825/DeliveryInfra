@@ -30,6 +30,17 @@ describe('ChatProvider', () => {
     expect(auth.refresh).toHaveBeenCalled();
   });
 
+  it('tolerates a duplicated broadcast-ended event resent by the API (R2-03)', () => {
+    chat.useChatRoom.mockReturnValue({ comments: [], connection: 'connected', capabilities: [], send: vi.fn(), remove: vi.fn() });
+    const queryClient = new QueryClient();
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries').mockResolvedValue();
+    render(<QueryClientProvider client={queryClient}><AuthContext.Provider value={makeAuth()}><ChatProvider><p>x</p></ChatProvider></AuthContext.Provider></QueryClientProvider>);
+    const options = chat.useChatRoom.mock.calls.at(-1)?.[0];
+    expect(() => { options.onEvent('broadcast-ended'); options.onEvent('broadcast-ended'); }).not.toThrow();
+    // 重複しても再取得が増えるだけで状態は壊れない（冪等）
+    expect(invalidate.mock.calls.map(([arg]) => arg?.queryKey)).toEqual([['broadcast'], ['archives'], ['broadcast'], ['archives']]);
+  });
+
   it('stays disconnected when signed out', () => {
     chat.useChatRoom.mockReturnValue({ comments: [], connection: 'disconnected', capabilities: [], send: vi.fn(), remove: vi.fn() });
     render(<QueryClientProvider client={new QueryClient()}><AuthContext.Provider value={makeAuth({ status: 'signedOut', me: null, config: null })}><ChatProvider><p>x</p></ChatProvider></AuthContext.Provider></QueryClientProvider>);

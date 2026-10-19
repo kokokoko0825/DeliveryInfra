@@ -44,6 +44,10 @@ export function createRecordingHandler(dependencies?: RecordingDependencies) {
       broadcastEnded = true;
     } catch (error) {
       if (!isConditionalFailure(error)) throw error;
+      // 前回の実行で ended へ更新後に SendEvent が失敗した再試行なら、終了通知を再送する（R2-03）
+      const current = await ddb.send(new GetCommand({ TableName: env.TABLE_NAME, Key: { PK: 'BROADCAST', SK: 'CURRENT' }, ConsistentRead: true }));
+      const item = current.Item as { compositionArn?: string; status?: string } | undefined;
+      broadcastEnded = item?.compositionArn === compositionArn && item.status === 'ended';
     }
     if (broadcastEnded) await sendChatEvent('broadcast-ended');
     if (event.detail.event_name === 'Session Failure') console.error(JSON.stringify({ level: 'error', event: 'composition_session_failure', compositionArn }));

@@ -155,7 +155,9 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
       try {
         await disconnectLease(previous, sameName ? '同じ端末名で再接続されました' : '送信枠が失効しました');
       } catch (error) {
-        await getDb().delete(KEYS.devicePk, sk, 'deviceId = :deviceId', { ':deviceId': deviceId }).catch(() => undefined);
+        // 旧参加者が接続したままなので旧枠を戻す。条件付きにして、その後の他端末の取得は上書きしない（R2-01）
+        // 切断を試みるのは旧枠がある場合だけなので previous は ALL_OLD の完全な行
+        await getDb().put(previous as Entity, 'deviceId = :deviceId', { ':deviceId': deviceId }).catch(() => undefined);
         throw error;
       }
       return { deviceId, sk };
@@ -312,7 +314,12 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
     }
     if (path === '/broadcast/stop' && method === 'POST') {
       adminFeature(principal, 'broadcastManage');
-      const broadcast = await db.get<Entity & { status?: string; compositionArn?: string; id?: string; title?: string; startedAt?: string }>('BROADCAST', 'CURRENT');
+      const broadcast = await db.get<Entity & { status?: string; compositionArn?: string; id?: string; title?: string; startedAt?: string; endedAt?: string }>('BROADCAST', 'CURRENT');
+      if (broadcast?.status === 'ended') {
+        // 前回の停止で SendEvent だけ失敗した場合の再試行。終了通知を再送する（重複はクライアントが許容する、R2-03）
+        await sendChatEvent('broadcast-ended');
+        return success({ id: broadcast.id, title: broadcast.title, status: 'ended', startedAt: broadcast.startedAt, endedAt: broadcast.endedAt ?? null });
+      }
       if (!broadcast || broadcast.status !== 'live') throw conflict('BROADCAST_NOT_LIVE', '配信中ではありません');
       if (broadcast.compositionArn) {
         // 全参加者の切断から1分で Composition は自動停止・削除される。その後の停止は成功扱いで ended に進める（R1-03）
@@ -562,7 +569,20 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
           const created = await clients.cognito.send(new AdminCreateUserCommand({ UserPoolId: env.USER_POOL_ID, Username: email, UserAttributes: [{ Name: 'email', Value: email }, { Name: 'email_verified', Value: 'true' }], DesiredDeliveryMediums: ['EMAIL'] }));
           const username = created.User?.Username;
           if (!username) throw new Error('AdminCreateUser returned no username');
-          await clients.cognito.send(new AdminAddUserToGroupCommand({ UserPoolId: env.USER_POOL_ID, Username: username, GroupName: request.role }));
+          try {
+            await clients.cognito.send(new AdminAddUserToGroupCommand({ UserPoolId: env.USER_POOL_ID, Username: username, GroupName: request.role }));
+          } catch (groupError) {
+            // ロールなしユーザーを残すと再招待できないため作成を取り消す。取り消しも失敗したら修復対象として返す（R2-02）
+            try {
+              await clients.cognito.send(new AdminDeleteUserCommand({ UserPoolId: env.USER_POOL_ID, Username: username }));
+            } catch (deleteError) {
+              console.error(JSON.stringify({ error: 'INVITE_COMPENSATION_FAILED', name: errorName(deleteError), groupError: errorName(groupError) }));
+              audit(principal, 'user.invite.created_without_role', username);
+              result.failed.push({ email, reason: 'CREATED_WITHOUT_ROLE' });
+              continue;
+            }
+            throw groupError;
+          }
           result.invited.push(email);
         } catch (error) {
           const name = errorName(error);
@@ -682,10 +702,11 @@ async function listUsers(clients: Clients, env: Env): Promise<JsonRecord[]> {
   return users.map((user) => {
     const userId = attribute(user.Attributes, 'sub') ?? '';
     const roles = user.Username ? rolesByUsername.get(user.Username) ?? [] : [];
+    // ロールなし・複数ロールは認証で拒否される状態。viewer と偽らず null（要修復）で返す（R2-04）
     const role = RoleSchema.safeParse(roles[0]);
     const profile = records.get(`${KEYS.user(userId)}|PROFILE`) as { commentSuspended?: boolean } | undefined;
     const login = records.get(`${KEYS.user(userId)}|LOGIN`) as { lastLoginAt?: string; loginMethod?: string } | undefined;
-    return { userId, email: attribute(user.Attributes, 'email') ?? '', loginMethod: login?.loginMethod ?? loginMethodOf(user.Attributes), role: role.success && roles.length === 1 ? role.data : 'viewer', enabled: user.Enabled === true, commentSuspended: profile?.commentSuspended === true, lastLoginAt: login?.lastLoginAt ?? null };
+    return { userId, email: attribute(user.Attributes, 'email') ?? '', loginMethod: login?.loginMethod ?? loginMethodOf(user.Attributes), role: role.success && roles.length === 1 ? role.data : null, enabled: user.Enabled === true, commentSuspended: profile?.commentSuspended === true, lastLoginAt: login?.lastLoginAt ?? null };
   });
 }
 

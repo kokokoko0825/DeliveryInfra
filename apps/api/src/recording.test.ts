@@ -58,6 +58,23 @@ describe('recording handler', () => {
     expect(chat.commandCalls(SendEventCommand).map((call) => call.args[0].input.eventName)).toEqual(['broadcast-ended', 'archives-updated']);
   });
 
+  it('resends broadcast-ended when a retry finds the broadcast already ended by this composition (R2-03)', async () => {
+    ddb.on(UpdateCommand).resolvesOnce({}).rejects(conditionalError());
+    ddb.on(GetCommand, { TableName: 'table', Key: { PK: 'BROADCAST', SK: 'CURRENT' }, ConsistentRead: true }).resolves({ Item: { status: 'ended', compositionArn: 'arn:composition' } });
+    chat.on(SendEventCommand).rejectsOnce(new Error('chat unavailable')).resolves({});
+    await expect(handler(event)).rejects.toThrow('chat unavailable');
+    await expect(handler(event)).resolves.toMatchObject({ archived: true, broadcastEnded: true });
+    expect(chat.commandCalls(SendEventCommand).map((call) => call.args[0].input.eventName)).toEqual(['broadcast-ended', 'broadcast-ended', 'archives-updated']);
+  });
+
+  it('does not announce the end of a different or still-live broadcast', async () => {
+    ddb.on(GetCommand, { TableName: 'table', Key: { PK: 'BROADCAST', SK: 'CURRENT' }, ConsistentRead: true }).resolves({ Item: { status: 'ended', compositionArn: 'arn:other' } });
+    await expect(handler(event)).resolves.toMatchObject({ broadcastEnded: false });
+    ddb.on(GetCommand, { TableName: 'table', Key: { PK: 'BROADCAST', SK: 'CURRENT' }, ConsistentRead: true }).resolves({ Item: { status: 'live', compositionArn: 'arn:composition' } });
+    await expect(handler(event)).resolves.toMatchObject({ broadcastEnded: false });
+    expect(chat.commandCalls(SendEventCommand).map((call) => call.args[0].input.eventName)).toEqual(['archives-updated', 'archives-updated']);
+  });
+
   it('keeps one archive when both end and failure events arrive', async () => {
     ddb.on(PutCommand).rejects(conditionalError());
     await expect(handler(event)).resolves.toMatchObject({ archived: true });

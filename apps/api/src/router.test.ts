@@ -172,8 +172,46 @@ describe('stage tokens and device slots', () => {
     ivs.on(DisconnectParticipantCommand).rejects(awsError('AccessDeniedException'));
     const failed = await request('camera', 'POST', '/tokens/stage', { purpose: 'camera', deviceName: 'CAM7' });
     expect(failed.statusCode).toBe(500);
-    expect(ddb.commandCalls(DeleteCommand).at(-1)?.args[0].input).toMatchObject({ Key: { PK: 'DEVICE', SK: 'camera#1' }, ConditionExpression: 'deviceId = :deviceId' });
+    const newDeviceId = ddb.commandCalls(PutCommand)[1]?.args[0].input.Item?.deviceId;
+    expect(ddb.commandCalls(PutCommand)[2]?.args[0].input).toMatchObject({ Item: lease('camera#1', { participantId: 'stale', stageArn: 'prod' }), ConditionExpression: 'deviceId = :deviceId', ExpressionAttributeValues: { ':deviceId': newDeviceId } });
     expect(ivs.commandCalls(CreateParticipantTokenCommand)).toHaveLength(1);
+  });
+
+  it('keeps the still-connected old lease when its disconnect fails so another device cannot take the slot (R2-01)', async () => {
+    // DynamoDB の枠行を条件式どおりに再現する
+    const table = new Map<string, Record<string, unknown>>([['camera#1', lease('camera#1', { participantId: 'stale', stageArn: 'prod', ttl: NOW_S - 1, deviceName: 'CAM3', userId: 'other' })]]);
+    ddb.on(PutCommand).callsFake(async (input: { Item: Record<string, unknown>; ConditionExpression?: string; ExpressionAttributeValues?: Record<string, unknown>; ExpressionAttributeNames?: Record<string, string> }) => {
+      const sk = String(input.Item.SK);
+      const current = table.get(sk);
+      const values = input.ExpressionAttributeValues ?? {};
+      const ok = input.ConditionExpression === 'deviceId = :deviceId' ? current?.deviceId === values[':deviceId']
+        : input.ConditionExpression === 'deviceId = :previous' ? current?.deviceId === values[':previous']
+          : !current || Number(current.ttl) <= Number(values[':now']);
+      if (!ok) throw conditionalError();
+      table.set(sk, input.Item);
+      return { Attributes: current };
+    });
+    ddb.on(DeleteCommand).callsFake(async (input: { Key: { SK: string }; ExpressionAttributeValues?: Record<string, unknown> }) => {
+      if (table.get(input.Key.SK)?.deviceId !== input.ExpressionAttributeValues?.[':deviceId']) throw conditionalError();
+      table.delete(input.Key.SK);
+      return {};
+    });
+    ivs.on(DisconnectParticipantCommand).rejects(awsError('ThrottlingException'));
+    expect((await request('camera', 'POST', '/tokens/stage', { purpose: 'camera', deviceName: 'CAM7' })).statusCode).toBe(500);
+    expect(table.get('camera#1')).toMatchObject({ participantId: 'stale', deviceName: 'CAM3', userId: 'other' });
+    // 旧枠は ttl 切れのままなので次の端末は再度切断を試み、成功するまで枠を確定できない
+    const other = await request('camera', 'POST', '/tokens/stage', { purpose: 'camera', deviceName: 'CAM8' }, 'user-2');
+    expect(other.statusCode).toBe(500);
+    expect(ivs.commandCalls(DisconnectParticipantCommand).map((call) => call.args[0].input.participantId)).toEqual(['stale', 'stale']);
+    expect(table.get('camera#1')).toMatchObject({ participantId: 'stale' });
+    expect(ivs.commandCalls(CreateParticipantTokenCommand)).toHaveLength(0);
+  });
+
+  it('does not overwrite a slot taken by another device while rolling back (R2-01)', async () => {
+    ddb.on(PutCommand).resolvesOnce({ Attributes: lease('camera#1', { participantId: 'stale', stageArn: 'prod' }) }).rejects(conditionalError());
+    ivs.on(DisconnectParticipantCommand).rejects(awsError('AccessDeniedException'));
+    expect((await request('camera', 'POST', '/tokens/stage', { purpose: 'camera', deviceName: 'CAM7' })).statusCode).toBe(500);
+    expect(ddb.commandCalls(PutCommand)[1]?.args[0].input.ConditionExpression).toBe('deviceId = :deviceId');
   });
 
   it('rejects an active duplicate device name owned by someone else (R1-18)', async () => {
@@ -287,6 +325,21 @@ describe('API router endpoint behavior', () => {
     expect(data(stopped)).toEqual({ id: 'b-1', title: '大会', status: 'ended', startedAt: '2026-01-01T00:00:00.000Z', endedAt: '2023-11-14T22:13:20.000Z' });
     ddb.on(GetCommand).resolves({});
     expect(data(await request('admin', 'POST', '/broadcast/stop')).error).toMatchObject({ code: 'BROADCAST_NOT_LIVE', message: '配信中ではありません' });
+    ddb.on(GetCommand).resolves({ Item: { id: 'b-1', status: 'idle' } });
+    expect(data(await request('admin', 'POST', '/broadcast/stop')).error).toMatchObject({ code: 'BROADCAST_NOT_LIVE' });
+  });
+
+  it('resends broadcast-ended on a second stop after the first SendEvent failed (R2-03)', async () => {
+    const live = { id: 'b-1', title: '大会', status: 'live', compositionArn: 'composition-arn', startedAt: '2026-01-01T00:00:00.000Z' };
+    ddb.on(GetCommand).resolvesOnce({ Item: live }).resolves({ Item: { ...live, status: 'ended', endedAt: '2023-11-14T22:13:20.000Z' } });
+    chat.on(SendEventCommand).rejectsOnce(awsError('ThrottlingException')).resolves({});
+    expect((await request('admin', 'POST', '/broadcast/stop')).statusCode).toBe(500);
+    const retried = await request('admin', 'POST', '/broadcast/stop');
+    expect(retried.statusCode).toBe(200);
+    expect(data(retried)).toEqual({ id: 'b-1', title: '大会', status: 'ended', startedAt: '2026-01-01T00:00:00.000Z', endedAt: '2023-11-14T22:13:20.000Z' });
+    expect(chat.commandCalls(SendEventCommand).map((call) => call.args[0].input.eventName)).toEqual(['broadcast-ended', 'broadcast-ended']);
+    expect(ivs.commandCalls(StopCompositionCommand)).toHaveLength(1);
+    expect(ddb.commandCalls(UpdateCommand)).toHaveLength(1);
   });
 
   it('ends the broadcast when the composition already stopped by itself (R1-03)', async () => {
@@ -563,6 +616,27 @@ describe('user management', () => {
     expect(data(await request('admin', 'POST', '/users/invite', { emails: ['a@example.test'], role: 'camera' }))).toEqual({ invited: [], failed: [{ email: 'a@example.test', reason: 'FAILED' }] });
   });
 
+  it('deletes the created user when the group assignment fails so the address can be invited again (R2-02)', async () => {
+    cognito.on(AdminAddUserToGroupCommand).rejectsOnce(awsError('InternalErrorException')).resolves({});
+    const first = UserInviteResponseSchema.parse(data(await request('admin', 'POST', '/users/invite', { emails: ['a@example.test', 'b@example.test'], role: 'camera' })));
+    expect(first).toEqual({ invited: ['b@example.test'], failed: [{ email: 'a@example.test', reason: 'FAILED' }] });
+    expect(cognito.commandCalls(AdminDeleteUserCommand).map((call) => call.args[0].input)).toEqual([{ UserPoolId: 'pool', Username: 'new-user' }]);
+  });
+
+  it('reports CREATED_WITHOUT_ROLE and audits it when the compensation delete also fails (R2-02)', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    cognito.on(AdminAddUserToGroupCommand).rejects(awsError('InternalErrorException'));
+    cognito.on(AdminDeleteUserCommand).rejects(awsError('TooManyRequestsException'));
+    const response = UserInviteResponseSchema.parse(data(await request('admin', 'POST', '/users/invite', { emails: ['a@example.test'], role: 'camera' })));
+    expect(response).toEqual({ invited: [], failed: [{ email: 'a@example.test', reason: 'CREATED_WITHOUT_ROLE' }] });
+    expect(cognito.commandCalls(AdminDeleteUserCommand)).toHaveLength(1);
+    const audits = info.mock.calls.map(([line]) => JSON.parse(String(line)) as { action: string; target?: string });
+    expect(audits).toContainEqual(expect.objectContaining({ action: 'user.invite.created_without_role', target: 'new-user' }));
+    expect(error.mock.calls.map(([line]) => JSON.parse(String(line)).error)).toContain('INVITE_COMPENSATION_FAILED');
+    info.mockRestore(); error.mockRestore();
+  });
+
   it('changes roles, signs the user out and invalidates issued access tokens (R1-09)', async () => {
     cognito.on(ListUsersCommand).resolves({ Users: [{ Username: 'cognito-user', Attributes: [{ Name: 'sub', Value: 'target' }] }] });
     cognito.on(AdminListGroupsForUserCommand).resolves({ Groups: [{ GroupName: 'admin' }, { GroupName: 'viewer' }] });
@@ -613,12 +687,19 @@ describe('user management', () => {
     expect(users).toEqual([
       { userId: 'target', email: 'target@example.test', loginMethod: 'email', role: 'admin', enabled: true, commentSuspended: true, lastLoginAt: '2026-01-01T00:00:00.000Z' },
       { userId: 'okta', email: 'okta@example.test', loginMethod: 'Okta', role: 'camera', enabled: false, commentSuspended: false, lastLoginAt: null },
-      { userId: 'multi', email: 'multi@example.test', loginMethod: 'email', role: 'viewer', enabled: true, commentSuspended: false, lastLoginAt: null },
+      // 複数ロールは viewer と偽らず要修復（null）として返す（R2-04）
+      { userId: 'multi', email: 'multi@example.test', loginMethod: 'email', role: null, enabled: true, commentSuspended: false, lastLoginAt: null },
     ]);
     expect(cognito.commandCalls(ListUsersInGroupCommand).map((call) => call.args[0].input.GroupName)).toEqual(['admin', 'camera', 'audio', 'presenter', 'viewer']);
     expect(cognito.commandCalls(AdminListGroupsForUserCommand)).toHaveLength(0);
     expect(ddb.commandCalls(GetCommand)).toHaveLength(0);
     expect(ddb.commandCalls(BatchGetCommand)[0]?.args[0].input.RequestItems?.table?.Keys).toHaveLength(6);
+  });
+
+  it('returns a null role for users without any role group (R2-04)', async () => {
+    cognito.on(ListUsersCommand).resolves({ Users: [{ Username: 'none', Enabled: true, Attributes: [{ Name: 'sub', Value: 'none' }, { Name: 'email', Value: 'none@example.test' }] }] });
+    const users = UsersResponseSchema.parse(data(await request('admin', 'GET', '/users')));
+    expect(users.map((item) => item.role)).toEqual([null]);
   });
 
   it('chunks BatchGet requests at 100 keys and retries unprocessed keys', async () => {

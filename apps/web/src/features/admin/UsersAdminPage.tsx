@@ -23,10 +23,11 @@ import { queryKeys } from '@/lib/query-keys';
 import { parseEmailCsv, parseEmailList } from '@/lib/validation';
 import { changeRole, deleteUser, fetchUsers, inviteUsers, setUserEnabled } from './users-api';
 
-function RoleSelect({ id, value, onChange, disabled, label }: { id?: string; value: Role; onChange: (role: Role) => void; disabled?: boolean; label?: string }) {
+function RoleSelect({ id, value, onChange, disabled, label }: { id?: string; value: Role | null; onChange: (role: Role) => void; disabled?: boolean; label?: string }) {
   return (
-    <Select value={value} onValueChange={(next) => onChange(next as Role)} disabled={disabled}>
-      <SelectTrigger id={id} className="min-h-11 w-36" aria-label={label}><SelectValue /></SelectTrigger>
+    // 空文字で未選択（プレースホルダー表示）にする。ロール要修復のユーザーで使う（R2-04）
+    <Select value={value ?? ''} onValueChange={(next) => onChange(next as Role)} disabled={disabled}>
+      <SelectTrigger id={id} className="min-h-11 w-36" aria-label={label}><SelectValue placeholder="ロールを選択" /></SelectTrigger>
       <SelectContent>
         {ROLES.map((role) => <SelectItem key={role} value={role} className="min-h-11">{ROLE_LABELS[role]}</SelectItem>)}
       </SelectContent>
@@ -38,6 +39,7 @@ const INVITE_FAILURE_LABELS: Record<(typeof INVITE_FAILURE_REASONS)[number], str
   ALREADY_EXISTS: 'すでに登録されています',
   INVALID_PARAMETER: 'メールアドレスが受け付けられませんでした',
   FAILED: '送信に失敗しました',
+  CREATED_WITHOUT_ROLE: 'アカウントは作成されましたがロールを付与できませんでした。一覧でロールを設定してください',
 };
 
 function InviteFailures({ failed }: { failed: UserInviteResponse['failed'] }) {
@@ -67,7 +69,8 @@ function InviteForm() {
       if (result.invited.length > 0) toast.success(`${result.invited.length} 件の招待メールを送信しました`);
       // 失敗分だけ入力欄に残し、直して再送できるようにする（R1-11）
       setFailed(result.failed);
-      setText(result.failed.map((failure) => failure.email).join('\n'));
+      // CREATED_WITHOUT_ROLE は再招待すると「登録済み」になるため残さず、一覧のロール変更で直す（R2-02）
+      setText(result.failed.filter((failure) => failure.reason !== 'CREATED_WITHOUT_ROLE').map((failure) => failure.email).join('\n'));
       return queryClient.invalidateQueries({ queryKey: queryKeys.users });
     },
     onError: (cause) => setError(errorMessage(cause)),
@@ -153,8 +156,11 @@ function UsersTable() {
               <TableCell className="break-all whitespace-normal">{user.email}{self && <span className="ml-1 text-muted-foreground">（自分）</span>}</TableCell>
               <TableCell>{user.loginMethod === 'Okta' ? 'Okta' : 'メール'}</TableCell>
               <TableCell>
-                <RoleSelect value={user.role} disabled={self || role.isPending} label={`${user.email} のロール`}
-                  onChange={(next) => role.mutate({ userId: user.userId, role: next })} />
+                <div className="flex flex-wrap items-center gap-2">
+                  <RoleSelect value={user.role} disabled={self || role.isPending} label={`${user.email} のロール`}
+                    onChange={(next) => role.mutate({ userId: user.userId, role: next })} />
+                  {user.role === null && <Badge variant="destructive"><CircleAlert aria-hidden />ロール要修復</Badge>}
+                </div>
               </TableCell>
               <TableCell>{user.lastLoginAt ? formatDateTime(user.lastLoginAt) : '—'}</TableCell>
               <TableCell><Badge variant={user.enabled ? 'secondary' : 'outline'}>{user.enabled ? '有効' : '無効'}</Badge></TableCell>

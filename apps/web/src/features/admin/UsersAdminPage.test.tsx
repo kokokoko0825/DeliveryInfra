@@ -86,6 +86,22 @@ describe('UsersAdminPage invite (A-05)', () => {
     expect(emails()).toHaveValue('b@example.com\nc@example.com');
   });
 
+  it('explains CREATED_WITHOUT_ROLE and keeps it out of the retry list because it is repaired from the user list (R2-02)', async () => {
+    mockApi({
+      'GET /api/users': [],
+      'POST /api/users/invite': { invited: [], failed: [{ email: 'a@example.com', reason: 'CREATED_WITHOUT_ROLE' }, { email: 'b@example.com', reason: 'FAILED' }] },
+    });
+    renderPage(<UsersAdminPage />, { auth: admin });
+    fireEvent.change(emails(), { target: { value: 'a@example.com\nb@example.com' } });
+    invite();
+    const list = within(await screen.findByRole('alert')).getByRole('list', { name: '招待できなかったアドレス' });
+    expect(within(list).getAllByRole('listitem').map((item) => item.textContent)).toEqual([
+      'a@example.com：アカウントは作成されましたがロールを付与できませんでした。一覧でロールを設定してください',
+      'b@example.com：送信に失敗しました',
+    ]);
+    expect(emails()).toHaveValue('b@example.com');
+  });
+
   it('keeps earlier batches when a later batch fails (R1-11)', async () => {
     let call = 0;
     mockApi({
@@ -135,6 +151,20 @@ describe('UsersAdminPage list (A-05)', () => {
     fireEvent.click(await screen.findByRole('option', { name: '登壇者' }));
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith('ロールを変更しました'));
     expect(bodyOf(callsTo(fetchMock, 'PUT /api/users/u1/role')[0])).toEqual({ role: 'presenter' });
+  });
+
+  it('flags users with an invalid role and repairs them by choosing a role (R2-04)', async () => {
+    const fetchMock = mockApi({ 'GET /api/users': [...users, user('broken', { role: null })], 'PUT /api/users/broken/role': { userId: 'broken', role: 'viewer', enabled: true } });
+    renderPage(<UsersAdminPage />, { auth: admin });
+    await screen.findByText('broken@example.com');
+    const row = rowOf('broken@example.com');
+    expect(within(row).getByText('ロール要修復')).toBeInTheDocument();
+    expect(within(row).getByRole('combobox', { name: 'broken@example.com のロール' })).toHaveTextContent('ロールを選択');
+    expect(within(rowOf('u1@example.com')).queryByText('ロール要修復')).not.toBeInTheDocument();
+    fireEvent.keyDown(within(row).getByRole('combobox'), { key: 'Enter' });
+    fireEvent.click(await screen.findByRole('option', { name: '視聴者' }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('ロールを変更しました'));
+    expect(bodyOf(callsTo(fetchMock, 'PUT /api/users/broken/role')[0])).toEqual({ role: 'viewer' });
   });
 
   it('disables (with confirmation), enables and deletes users', async () => {

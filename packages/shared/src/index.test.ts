@@ -6,7 +6,7 @@ import {
   MeResponseSchema, NgWordSchema, normalizeForModeration, RecentCommentsResponseSchema, ROLE_PURPOSES,
   ROLES, RoleSchema, SlideOrderRequestSchema, SlideUploadSchema, SlideUploadUrlResponseSchema, SlidesResponseSchema,
   StagePurposeSchema, StageTokenRequestSchema, StageTokenResponseSchema, StatusResponseSchema, UpdateRoleRequestSchema,
-  UsersResponseSchema, ViewerCountResponseSchema, STAGE_LIMITS, FEATURES, UserInviteResponseSchema,
+  UsersResponseSchema, ViewerCountResponseSchema, STAGE_LIMITS, FEATURES, UserInviteResponseSchema, InviteFailureSchema,
 } from './index';
 
 describe('shared schemas', () => {
@@ -54,6 +54,10 @@ describe('shared schemas', () => {
     expect(ArchivesResponseSchema.safeParse([{ ...archive, playbackPath: 'https://evil.test/x.m3u8' }]).success).toBe(false);
     const user = { userId: 'u', email: 'a@example.com', loginMethod: 'email', role: 'viewer', enabled: true, commentSuspended: false, lastLoginAt: null };
     expect(UsersResponseSchema.safeParse([user]).success).toBe(true);
+    // 不正/複数ロールは null（要修復）として返す。未知のロール文字列は拒否する（R2-04）
+    expect(UsersResponseSchema.safeParse([{ ...user, role: null }]).success).toBe(true);
+    expect(UsersResponseSchema.safeParse([{ ...user, role: 'fake' }]).success).toBe(false);
+    expect(InviteFailureSchema.safeParse({ email: 'a@example.com', reason: 'CREATED_WITHOUT_ROLE' }).success).toBe(true);
     expect(ArchivesResponseSchema.safeParse([{ ...archive, retainUntil: undefined }]).success).toBe(false);
     expect(CommentSchema.safeParse('   ').success).toBe(false);
     expect(CommentSchema.safeParse(' a ').data).toBe('a');
