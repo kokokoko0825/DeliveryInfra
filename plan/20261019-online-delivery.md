@@ -83,9 +83,10 @@ content bucket のキー: `slides/<slideId>.pdf`, `archives/<archiveId>/...(HLS)
 | PUT /api/slides/order | admin | `{ids:string[]}` |
 | DELETE /api/slides/{id} | admin | S3 削除 + Chat イベント `slides-updated` |
 | GET /api/archives | 全員 | viewer 等は公開のみ、admin は全件 |
-| PATCH /api/archives/{id} | admin | `{title?,published?}` |
+| PATCH /api/archives/{id} | admin | `{title?,published?,retainUntil?}`（保存期限延長、5.5。期限到来で DynamoDB TTL→Stream→録画削除） |
 | DELETE /api/archives/{id} | admin | S3 プレフィックス削除 |
-| POST /api/files/cookies | 全員 | `/files/*` 用 CloudFront 署名付きCookie を Set-Cookie（有効1時間） |
+| POST /api/files/cookies | 全員 | スライド用 署名付きCookie（Resource `/files/slides/*`、Cookie Path `/files/slides/`、有効1時間） |
+| POST /api/archives/{id}/cookies | 全員 | 当該アーカイブ用 署名付きCookie（Resource `/files/archives/<prefix>/*`、Path 同じ）。非公開は admin のみ（Review-1 R1-08） |
 | GET /api/users | admin | `{userId,email,loginMethod,role,enabled,lastLoginAt}` |
 | POST /api/users/invite | admin | `{emails:string[](1〜100), role}` AdminCreateUser(仮パスワードメール) |
 | PUT /api/users/{userId}/role | admin | `{role}` |
@@ -100,7 +101,7 @@ content bucket のキー: `slides/<slideId>.pdf`, `archives/<archiveId>/...(HLS)
 | camera | camera, admin | production: PUBLISH（attributes `{kind:'camera',deviceName}`） | 6 |
 | mic | audio, admin | production: PUBLISH（`{kind:'mic',deviceName}`） | 5 |
 | slide | presenter, admin | slide: PUBLISH（`{kind:'slide',deviceName:'SLIDE'}`） | 1 |
-| switcher | admin | production+slide: SUBSCRIBE, broadcast: PUBLISH | 1 |
+| switcher | admin | production+slide: SUBSCRIBE, broadcast: PUBLISH | 枠管理なし（Review-1 R1-02） |
 
 `deviceName` は `^(CAM|MIC)[1-9]$` 形式を推奨入力（1〜16文字、英数字と -）。トークン有効期限は短く（参加用 10 分程度、再接続時は再発行）。
 上限超過は 409 `{code:'DEVICE_LIMIT'}`。

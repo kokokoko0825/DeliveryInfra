@@ -9,7 +9,7 @@ export const ROLE_PURPOSES: Record<Role, readonly StagePurpose[]> = {
   admin: ['viewer', 'camera', 'mic', 'slide', 'switcher'], camera: ['viewer', 'camera'],
   audio: ['viewer', 'mic'], presenter: ['viewer', 'slide'], viewer: ['viewer'],
 };
-export const STAGE_LIMITS = { camera: 6, mic: 5, slide: 1, switcher: 1 } as const;
+export const STAGE_LIMITS = { camera: 6, mic: 5, slide: 1 } as const;
 export const canRequestPurpose = (role: Role, purpose: StagePurpose): boolean => ROLE_PURPOSES[role].includes(purpose);
 
 export const FEATURES = ['watch', 'archives', 'cameraSend', 'micSend', 'slideShare', 'switcher', 'broadcastManage', 'slideManage', 'commentModeration', 'userManage'] as const;

@@ -49,11 +49,17 @@ describe('shared schemas', () => {
     expect(SlideOrderRequestSchema.safeParse({ ids: ['a'] }).success).toBe(true);
     expect(SlideUploadUrlResponseSchema.safeParse({ slideId: 's1', url: 'https://example.test', fields: {} }).success).toBe(true);
     expect(SlideUploadUrlResponseSchema.safeParse({ url: 'https://example.test', fields: {} }).success).toBe(false);
-    const archive = { id: 'a1', title: 't', published: false, durationSeconds: 0, playbackPath: '/files/archives/a1/multivariant.m3u8' };
+    const archive = { id: 'a1', title: 't', published: false, durationSeconds: 0, playbackPath: '/files/archives/a1/multivariant.m3u8', retainUntil: '2027-10-19T00:00:00.000Z' };
     expect(ArchivesResponseSchema.safeParse([archive]).success).toBe(true);
     expect(ArchivesResponseSchema.safeParse([{ ...archive, playbackPath: 'https://evil.test/x.m3u8' }]).success).toBe(false);
     const user = { userId: 'u', email: 'a@example.com', loginMethod: 'email', role: 'viewer', enabled: true, commentSuspended: false, lastLoginAt: null };
     expect(UsersResponseSchema.safeParse([user]).success).toBe(true);
+    expect(ArchivesResponseSchema.safeParse([{ ...archive, retainUntil: undefined }]).success).toBe(false);
+    expect(CommentSchema.safeParse('   ').success).toBe(false);
+    expect(CommentSchema.safeParse(' a ').data).toBe('a');
+    expect(CommentSchema.safeParse('a\u0007b').success).toBe(false);
+    expect(CommentSchema.safeParse('x'.repeat(200)).success).toBe(true);
+    expect(CommentSchema.safeParse('x'.repeat(201)).success).toBe(false);
     expect(UsersResponseSchema.safeParse([{ ...user, commentSuspended: undefined }]).success).toBe(false);
     expect(InviteUsersRequestSchema.safeParse({ emails: [], role: 'admin' }).success).toBe(false);
     expect(UpdateRoleRequestSchema.safeParse({ role: 'fake' }).success).toBe(false);
@@ -69,7 +75,7 @@ describe('shared schemas', () => {
   });
   it('has explicit purpose permissions and stage limits', () => {
     expect(ROLE_PURPOSES).toEqual({ admin: ['viewer', 'camera', 'mic', 'slide', 'switcher'], camera: ['viewer', 'camera'], audio: ['viewer', 'mic'], presenter: ['viewer', 'slide'], viewer: ['viewer'] });
-    expect(STAGE_LIMITS).toEqual({ camera: 6, mic: 5, slide: 1, switcher: 1 });
+    expect(STAGE_LIMITS).toEqual({ camera: 6, mic: 5, slide: 1 });
     const purposes = ['viewer', 'camera', 'mic', 'slide', 'switcher'] as const;
     for (const role of ROLES) for (const purpose of purposes) expect(canRequestPurpose(role, purpose)).toBe(ROLE_PURPOSES[role].includes(purpose));
   });
