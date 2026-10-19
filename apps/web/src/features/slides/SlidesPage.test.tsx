@@ -22,6 +22,10 @@ describe('SlidesPage (U-02)', () => {
     expect(frame.tagName).toBe('IFRAME');
     expect(frame).toHaveAttribute('src', '/files/slides/b.pdf');
     expect(screen.getByRole('link', { name: '新しいタブで開く' })).toHaveAttribute('target', '_blank');
+    // 長いスライド名が 44px の閉じるボタンに隠れないよう、見出しに右余白がある（R5-04）
+    const title = screen.getByRole('heading', { name: '資料b' });
+    expect(title).toHaveClass('break-words');
+    expect(title.closest('[data-slot="dialog-header"]')).toHaveClass('pr-12');
     fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
     await waitFor(() => expect(screen.queryByTitle('資料b')).not.toBeInTheDocument());
   });

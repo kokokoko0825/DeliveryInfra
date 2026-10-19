@@ -101,6 +101,8 @@ export function buildRuntimeConfig(input: RuntimeConfigInput): Record<string, un
 export const oauthRedirectUrl = (cloudFrontDomain: string) => `https://${cloudFrontDomain}/login`;
 
 export const TOKEN_VALIDITY = { accessTokenHours: 1, idTokenHours: 1, refreshTokenHours: 12 } as const;
+/** Okta IdP の属性マッピング(Cognito の属性 → Okta のクレーム)。 */
+export const OKTA_ATTRIBUTE_MAPPING = { email: 'email' } as const;
 export const OAUTH_SCOPES = ['openid', 'email', 'profile', 'aws.cognito.signin.user.admin'];
 
 /**
@@ -121,12 +123,16 @@ export function buildWebClientSettings(
     PreventUserExistenceErrors: 'ENABLED',
     EnableTokenRevocation: true,
     SupportedIdentityProviders: ['COGNITO'],
+    // 未指定だと利用者が自分のアクセストークンで標準属性(email など)を書き換えられるため、書き込みを許さない(R5-02)
+    WriteAttributes: [],
   };
   if (!oauth) return settings;
   const redirect = oauthRedirectUrl(oauth.cloudFrontDomain);
   return {
     ...settings,
     SupportedIdentityProviders: ['COGNITO', oauth.providerName],
+    // IdP の属性マッピング先は App Client が書き込めないとフェデレーションのサインインが失敗する(R5-02)
+    WriteAttributes: Object.keys(OKTA_ATTRIBUTE_MAPPING),
     AllowedOAuthFlowsUserPoolClient: true,
     AllowedOAuthFlows: ['code'],
     AllowedOAuthScopes: OAUTH_SCOPES,

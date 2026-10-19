@@ -17,8 +17,9 @@ function SlideViewer({ slide, onClose }: { slide: Slide | null; onClose: () => v
   return (
     <Dialog open={slide !== null} onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent className="flex h-[90vh] max-w-[min(90vw,72rem)] flex-col sm:max-w-[min(90vw,72rem)]">
-        <DialogHeader>
-          <DialogTitle>{slide?.title}</DialogTitle>
+        {/* 閉じるボタン(右上 8〜52px)にスライド名が隠れないよう右に余白を取る（R5-04） */}
+        <DialogHeader className="pr-12">
+          <DialogTitle className="break-words">{slide?.title}</DialogTitle>
           <DialogDescription>表示されない場合は「新しいタブで開く」をお試しください。</DialogDescription>
         </DialogHeader>
         {slide && <iframe className="min-h-0 w-full flex-1 rounded-md border" src={slideFileUrl(slide.id)} title={slide.title} />}

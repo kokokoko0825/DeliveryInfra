@@ -427,6 +427,25 @@ describe('API router endpoint behavior', () => {
     warn.mockRestore();
   });
 
+  it('gives up on a SendEvent that never answers within 3 seconds and still reports the start as done (R5-01)', async () => {
+    chat.on(SendEventCommand).callsFake(() => new Promise(() => undefined));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.useFakeTimers();
+    let settled = false;
+    const pending = request('admin', 'POST', '/broadcast/start', { title: '大会' }).finally(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const response = await pending;
+    expect(response.statusCode).toBe(200);
+    expect(chat.commandCalls(SendEventCommand)).toHaveLength(1);
+    expect(((chat.commandCalls(SendEventCommand)[0]?.args as unknown[])[1] as { abortSignal?: AbortSignal }).abortSignal?.aborted).toBe(true);
+    expect(JSON.parse(String(warn.mock.calls[0]?.[0]))).toMatchObject({ warning: 'CHAT_EVENT_FAILED', eventName: 'broadcast-started', name: 'TimeoutError' });
+    expect(vi.getTimerCount()).toBe(0);
+    vi.useRealTimers();
+    warn.mockRestore();
+  });
+
   it.each([
     ['POST', '/broadcast/start', { title: '大会' }, 'broadcast.start'],
     ['PUT', '/slides/order', { ids: ['s-1'] }, 'slide.order'],

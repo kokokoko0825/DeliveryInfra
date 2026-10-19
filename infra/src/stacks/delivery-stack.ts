@@ -34,6 +34,7 @@ import {
   buildLambdaEnvironment,
   buildRuntimeConfig,
   buildWebClientSettings,
+  OKTA_ATTRIBUTE_MAPPING,
 } from '../app-config.ts';
 import type { DeliveryConfig } from '../config.ts';
 import {
@@ -208,6 +209,8 @@ export class DeliveryStack extends Stack {
       signInAliases: { email: true },
       autoVerify: { email: true },
       standardAttributes: { email: { required: true, mutable: true } },
+      // 新しいアドレスの確認が済むまで元の email を保つ(R5-02。Okta 連携で email が書き込み可能な場合の多層防御)
+      keepOriginal: { email: true },
       passwordPolicy: {
         minLength: 12,
         requireLowercase: true,
@@ -387,7 +390,8 @@ export class DeliveryStack extends Stack {
       }),
     );
     apiFn.addToRolePolicy(
-      new iam.PolicyStatement({ actions: ['s3:GetObject', 's3:DeleteObject'], resources: [recordingBucket.arnForObjects('*')] }),
+      // アーカイブ削除(ListObjectsV2 + DeleteObjects)だけに使う。録画の読み取りは不要(R5-03)
+      new iam.PolicyStatement({ actions: ['s3:DeleteObject'], resources: [recordingBucket.arnForObjects('*')] }),
     );
     apiFn.addToRolePolicy(new iam.PolicyStatement({ actions: ['s3:ListBucket'], resources: [recordingBucket.bucketArn] }));
     apiFn.addToRolePolicy(
@@ -543,7 +547,7 @@ export class DeliveryStack extends Stack {
           Issuer: config.okta.issuer,
           ClientId: config.okta.clientId,
           ClientSecretParameter: config.okta.clientSecretParameter,
-          AttributeMapping: { email: 'email' },
+          AttributeMapping: OKTA_ATTRIBUTE_MAPPING,
         },
       });
 

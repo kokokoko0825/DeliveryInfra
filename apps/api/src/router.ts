@@ -54,9 +54,10 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 /** deviceId は `<purpose>.<slot>.<uuid>`。スロットを埋め込んで Scan せずに引けるようにする（R1-10）。 */
 const DEVICE_ID_PATTERN = /^(camera|mic|slide)\.([1-9]\d*)\.([0-9a-f-]{36})$/u;
 const SAFE_PREFIX_PATTERN = /^[A-Za-z0-9/_-]+$/u;
-/** 確定後の Chat 通知の再試行回数と初回の待ち時間（R4-01）。 */
+/** 確定後の Chat 通知の再試行回数と初回の待ち時間（R4-01）、全体の締め切り（R5-01: API Gateway の 29 秒より十分短くする）。 */
 const NOTIFY_RETRIES = 3;
 const NOTIFY_BACKOFF_MS = 50;
+const NOTIFY_DEADLINE_MS = 3000;
 let signingKeyCache: { value: string; expiresAt: number } | undefined;
 const adminFeature = (principal: Principal, feature: Feature) => { if (!canAccess(principal.role, feature)) throw forbidden(); };
 const audit = (principal: Principal, action: string, target?: string) => console.info(JSON.stringify({ audit: true, userId: principal.userId, action, target, at: new Date().toISOString() }));
@@ -109,20 +110,30 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
    * 状態を確定した後の Chat 通知。短いバックオフで最大3回まで再試行し、それでも失敗したら警告ログだけ残して成功扱いにする。
    * 確定済みの操作を 500 にすると、画面が失敗と表示し、再試行が 404 になるため（R4-01 / R3-14）。
    * 通知の欠落は、クライアントのポーリングと再取得で回復する。
+   * SendEvent が応答しないときも Lambda のタイムアウトで 5xx にならないよう、全体を NOTIFY_DEADLINE_MS で打ち切る（R5-01）。
    */
   async function notify(eventName: ChatEventName) {
     const validated = valid(ChatCustomEventSchema, { eventName });
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        await getClients().chat.send(new SendEventCommand({ roomIdentifier: getEnvValue().CHAT_ROOM_ARN, eventName: validated.eventName }));
-        return;
-      } catch (error) {
-        if (attempt >= NOTIFY_RETRIES) {
-          console.warn(JSON.stringify({ warning: 'CHAT_EVENT_FAILED', eventName, name: errorName(error), message: error instanceof Error ? error.message : String(error) }));
+    const controller = new AbortController();
+    const deadline = setTimeout(() => controller.abort(Object.assign(new Error('Chat notification deadline exceeded'), { name: 'TimeoutError' })), NOTIFY_DEADLINE_MS);
+    const expired = new Promise<never>((_, reject) => controller.signal.addEventListener('abort', () => reject(controller.signal.reason), { once: true }));
+    expired.catch(() => undefined);
+    try {
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          const command = new SendEventCommand({ roomIdentifier: getEnvValue().CHAT_ROOM_ARN, eventName: validated.eventName });
+          await Promise.race([getClients().chat.send(command, { abortSignal: controller.signal }), expired]);
           return;
+        } catch (error) {
+          if (attempt >= NOTIFY_RETRIES || controller.signal.aborted) {
+            console.warn(JSON.stringify({ warning: 'CHAT_EVENT_FAILED', eventName, name: errorName(error), message: error instanceof Error ? error.message : String(error) }));
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, NOTIFY_BACKOFF_MS * 2 ** attempt));
         }
-        await new Promise((resolve) => setTimeout(resolve, NOTIFY_BACKOFF_MS * 2 ** attempt));
       }
+    } finally {
+      clearTimeout(deadline);
     }
   }
 

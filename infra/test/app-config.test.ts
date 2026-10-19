@@ -111,6 +111,7 @@ describe('buildWebClientSettings', () => {
       PreventUserExistenceErrors: 'ENABLED',
       EnableTokenRevocation: true,
       SupportedIdentityProviders: ['COGNITO'],
+      WriteAttributes: [],
     });
   });
   it('Okta ありでは認可コードフローとコールバックを追加', () => {
@@ -118,6 +119,7 @@ describe('buildWebClientSettings', () => {
       ClientName: 'web',
       AccessTokenValidity: 1,
       SupportedIdentityProviders: ['COGNITO', 'Okta'],
+      WriteAttributes: ['email'],
       AllowedOAuthFlowsUserPoolClient: true,
       AllowedOAuthFlows: ['code'],
       AllowedOAuthScopes: ['openid', 'email', 'profile', 'aws.cognito.signin.user.admin'],

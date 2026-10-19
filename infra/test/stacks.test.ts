@@ -98,6 +98,11 @@ describe('stg(既定)', () => {
       });
       t.main.resourceCountIs('Custom::AWS', 1); // CORS のみ。OAuth 更新は作らない
     });
+    it('App Client は利用者に属性を書き換えさせず、email の変更は確認まで元の値を保つ（R5-02）', () => {
+      const [[, client]] = resourcesOf(t.main, 'AWS::Cognito::UserPoolClient') as [[string, { Properties: Record<string, unknown> }]];
+      expect(client.Properties.WriteAttributes).toEqual([]);
+      t.main.hasResourceProperties('AWS::Cognito::UserPool', { UserAttributeUpdateSettings: { AttributesRequireVerificationBeforeUpdate: ['email'] } });
+    });
     it('Hosted UI のプレフィックスドメイン', () => {
       t.main.hasResourceProperties('AWS::Cognito::UserPoolDomain', {
         Domain: { 'Fn::Join': ['', ['delivery-stg-', { Ref: 'AWS::AccountId' }]] },
@@ -306,6 +311,14 @@ describe('stg(既定)', () => {
       expect(actions).not.toContain('ivs:GetComposition');
       expect(policyOf('ApiFunction')).toContainEqual({ Effect: 'Allow', Action: 'ivs:StopComposition', Resource: 'arn:aws:ivs:ap-northeast-1:123456789012:composition/*' });
       expect(JSON.stringify(policyOf('ApiFunction'))).not.toContain('comment-exports');
+    });
+    it('api: 録画バケットは一覧と削除だけで、録画を読めない（R5-03）', () => {
+      const recording = { 'Fn::GetAtt': [expect.stringMatching(/^RecordingBucket/), 'Arn'] };
+      const onRecording = policyOf('ApiFunction').filter((s) => JSON.stringify(s.Resource).includes('RecordingBucket'));
+      expect(onRecording).toEqual([
+        { Effect: 'Allow', Action: 's3:DeleteObject', Resource: { 'Fn::Join': ['', [recording, '/*']] } },
+        { Effect: 'Allow', Action: 's3:ListBucket', Resource: recording },
+      ]);
     });
 
     const policyOf = (prefix: string) =>
@@ -551,6 +564,8 @@ describe('Okta 連携あり・prod', () => {
       .find((s) => s.includes('updateUserPoolClient'))!;
     expect(update).toContain('\\"AllowedOAuthFlows\\":[\\"code\\"]');
     expect(update).toContain('\\"SupportedIdentityProviders\\":[\\"COGNITO\\",\\"Okta\\"]');
+    // マッピングした email だけ書き込みを許す（フェデレーションの属性更新に必要、R5-02）
+    expect(update).toContain('\\"WriteAttributes\\":[\\"email\\"]');
     expect(update).toContain('/login');
   });
   it('SES から招待メールを送る', () => {
