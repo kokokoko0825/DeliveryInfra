@@ -96,7 +96,7 @@ export default function SwitcherPage() {
             ))}
           </ul>
         ) : (
-          <Button className="h-11" onClick={() => void start()}><Power aria-hidden />スイッチャーを起動</Button>
+          <Button variant="destructive" className="h-11" onClick={() => void start()}><Power aria-hidden />スイッチャーを起動</Button>
         )}
       />
       {startError && <p role="alert" className="text-sm text-destructive">{startError}</p>}
