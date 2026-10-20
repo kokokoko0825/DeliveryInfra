@@ -22,6 +22,8 @@ export const USER_NAV: readonly NavItem[] = [
   { to: '/archives', label: 'アーカイブ', icon: Archive, feature: 'archives' },
   { to: '/send/camera', label: 'カメラ送信', icon: Camera, feature: 'cameraSend' },
   { to: '/send/mic', label: 'マイク送信', icon: Mic, feature: 'micSend' },
+  { to: '/venue/mic', label: '会場音声 PoC（マイク）', icon: Mic, feature: 'venueSpeaker' },
+  { to: '/venue/speaker', label: '会場音声 PoC（スピーカー）', icon: MonitorPlay, feature: 'venueSpeaker' },
   { to: '/send/slide', label: 'スライド共有', icon: MonitorUp, feature: 'slideShare' },
 ];
 

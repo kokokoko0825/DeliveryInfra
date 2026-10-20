@@ -15,6 +15,7 @@ export const KEYS = {
   archivePk: 'ARCHIVE',
   ngWordPk: 'NGWORD',
   compositionPk: (arn: string) => `COMPOSITION#${arn}`,
+  venueSpeakerPk: 'VENUE_SPEAKER#CURRENT',
 } as const;
 
 export interface QueryOptions {

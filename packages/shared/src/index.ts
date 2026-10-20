@@ -27,6 +27,7 @@ export const SlideUploadSchema = z.object({
 }).refine(({ fileName }) => fileName.toLowerCase().endsWith('.pdf'), { message: 'PDF 拡張子が必要です', path: ['fileName'] });
 /** takeover: 本人の別端末が同じ端末名で送信中のとき、明示的に引き継ぐ（R3-02）。 */
 export const StageTokenRequestSchema = z.object({ purpose: StagePurposeSchema, deviceName: DeviceNameSchema.optional(), takeover: z.boolean().optional() });
+export const VenueSignalSchema = z.object({ type: z.enum(['offer', 'answer']), sdp: z.string().min(1).max(32_000) });
 /** 他のユーザーが使用中の端末名（初期値の推定用、R3-01）。 */
 export const DeviceNamesResponseSchema = z.object({ inUse: z.array(DeviceNameSchema) });
 export const STAGE_NAMES = ['production', 'slide', 'broadcast'] as const;

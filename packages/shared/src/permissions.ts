@@ -12,10 +12,10 @@ export const ROLE_PURPOSES: Record<Role, readonly StagePurpose[]> = {
 export const STAGE_LIMITS = { camera: 6, mic: 5, slide: 1 } as const;
 export const canRequestPurpose = (role: Role, purpose: StagePurpose): boolean => ROLE_PURPOSES[role].includes(purpose);
 
-export const FEATURES = ['watch', 'archives', 'cameraSend', 'micSend', 'slideShare', 'switcher', 'broadcastManage', 'slideManage', 'commentModeration', 'userManage'] as const;
+export const FEATURES = ['watch', 'archives', 'cameraSend', 'micSend', 'venueSpeaker', 'slideShare', 'switcher', 'broadcastManage', 'slideManage', 'commentModeration', 'userManage'] as const;
 export type Feature = typeof FEATURES[number];
 const permissions: Record<Feature, readonly Role[]> = {
-  watch: ROLES, archives: ROLES, cameraSend: ['admin', 'camera'], micSend: ['admin', 'audio'],
+  watch: ROLES, archives: ROLES, cameraSend: ['admin', 'camera'], micSend: ['admin', 'audio'], venueSpeaker: ['admin', 'audio'],
   slideShare: ['admin', 'presenter'], switcher: ['admin'], broadcastManage: ['admin'],
   slideManage: ['admin'], commentModeration: ['admin'], userManage: ['admin'],
 };

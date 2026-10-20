@@ -17,7 +17,7 @@ import { getSignedCookies } from '@aws-sdk/cloudfront-signer';
 import { BatchGetCommand, PutCommand, type BatchGetCommandOutput } from '@aws-sdk/lib-dynamodb';
 import {
   ARCHIVE_RETENTION_DAYS, ArchiveIdParamsSchema, ArchiveUpdateRequestSchema, BroadcastStartRequestSchema, canAccess, canRequestPurpose,
-  ChatCustomEventSchema, CommentSuspensionRequestSchema, containsNgWord, DeviceIdParamsSchema,
+  ChatCustomEventSchema, CommentSuspensionRequestSchema, containsNgWord, DeviceIdParamsSchema, VenueSignalSchema,
   DisplayNameRequestSchema, InviteUsersRequestSchema, MessageIdParamsSchema, NgWordSchema,
   NgWordRequestSchema, RecentCommentsResponseSchema, ROLES, RoleSchema, SlideIdParamsSchema, SlideOrderRequestSchema,
   SlideUploadSchema, SlideUpdateRequestSchema, StageTokenRequestSchema, UserIdParamsSchema,
@@ -411,6 +411,28 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
     if (path === '/tokens/stage' && method === 'POST') {
       const request = valid(StageTokenRequestSchema, body);
       return success(await issueStageToken(principal, request.purpose, request.deviceName, request.takeover));
+    }
+    if (parts[0] === 'venue-speaker' && parts.length === 2 && ['mic', 'speaker'].includes(parts[1]!)) {
+      if (!['audio', 'admin'].includes(principal.role)) throw forbidden();
+      const side = parts[1]!;
+      const peerSide = side === 'mic' ? 'speaker' : 'mic';
+      if (method === 'PUT') {
+        const signal = valid(VenueSignalSchema, body);
+        if ((side === 'mic' && signal.type !== 'offer') || (side === 'speaker' && signal.type !== 'answer')) throw badRequest('SDP の役割が不正です');
+        const ttl = nowSeconds() + 90;
+        await db.put(entity(KEYS.venueSpeakerPk, side, { ...signal, userId: principal.userId, updatedAt: iso(now()), ttl }));
+        return success({ expiresAt: iso(ttl * 1000) });
+      }
+      if (method === 'GET') {
+        const signal = await db.get<Entity & { type?: string; sdp?: string; ttl?: number }>(KEYS.venueSpeakerPk, peerSide, true);
+        return success(signal && Number(signal.ttl) > nowSeconds() ? { type: signal.type, sdp: signal.sdp } : null);
+      }
+      if (method === 'DELETE') {
+        const signal = await db.get<Entity & { userId?: string }>(KEYS.venueSpeakerPk, side, true);
+        if (signal?.userId !== principal.userId && principal.role !== 'admin') throw notFound();
+        if (signal) await db.delete(KEYS.venueSpeakerPk, side);
+        return success();
+      }
     }
     if (parts[0] === 'devices') {
       if (parts.length === 1 && method === 'GET') {
