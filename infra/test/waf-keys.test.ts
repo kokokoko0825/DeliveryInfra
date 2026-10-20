@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { FAIL_CLOSED_PUBLIC_KEY, publicKeyPath, validatePublicKeyPem } from '../src/keys.ts';
-import { DEFAULT_RATE_LIMIT, RATE_LIMIT_PATH_PREFIX, buildWafRules } from '../src/waf.ts';
+import { DEFAULT_RATE_LIMIT, buildWafRules } from '../src/waf.ts';
 
 describe('buildWafRules', () => {
   it('マネージド3つ＋レート制限の4ルール', () => {
@@ -22,7 +22,7 @@ describe('buildWafRules', () => {
       visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: 'AWSManagedRulesCommonRuleSet', sampledRequestsEnabled: true },
     });
   });
-  it('レート制限は /api/* だけを IP ごと5分で数えてブロック', () => {
+  it('レート制限は全リクエストを IP ごと5分で数えてブロック(無料プランは scope-down 不可)', () => {
     expect(buildWafRules().at(-1)).toEqual({
       name: 'RateLimitPerIp',
       priority: 3,
@@ -32,24 +32,15 @@ describe('buildWafRules', () => {
           aggregateKeyType: 'IP',
           limit: DEFAULT_RATE_LIMIT,
           evaluationWindowSec: 300,
-          scopeDownStatement: {
-            byteMatchStatement: {
-              fieldToMatch: { uriPath: {} },
-              positionalConstraint: 'STARTS_WITH',
-              searchString: '/api/',
-              textTransformations: [{ priority: 0, type: 'NONE' }],
-            },
-          },
         },
       },
       visibilityConfig: { cloudWatchMetricsEnabled: true, metricName: 'RateLimitPerIp', sampledRequestsEnabled: true },
     });
     expect(buildWafRules(10).at(-1)?.statement).toMatchObject({ rateBasedStatement: { limit: 10 } });
   });
-  it('上限は NAT 配下300人(定常25件+入室8件/人)の約1.5倍', () => {
-    expect(DEFAULT_RATE_LIMIT).toBe(15_000);
-    expect(DEFAULT_RATE_LIMIT).toBeGreaterThanOrEqual(300 * (25 + 8));
-    expect(RATE_LIMIT_PATH_PREFIX).toBe('/api/');
+  it('上限は NAT 配下300人(SPA 45件+API 33件+HLS 30件/人)の約1.5倍', () => {
+    expect(DEFAULT_RATE_LIMIT).toBe(50_000);
+    expect(DEFAULT_RATE_LIMIT).toBeGreaterThanOrEqual(300 * (45 + 33 + 30));
   });
   it.each([9, 1.5, Number.NaN])('レート %s は拒否', (limit) => expect(() => buildWafRules(limit)).toThrow('レート制限'));
 });

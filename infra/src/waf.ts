@@ -9,13 +9,12 @@ export const MANAGED_RULE_GROUPS = [
 
 export const FREE_PLAN_RULE_LIMIT = 5;
 /**
- * 5分あたり・IP ごとの /api/* リクエスト上限。社内 NAT の出口 IP 1つの向こうに視聴者300人がいる想定で、
- * 定常 25件/人(統計15秒・配信状態60秒のポーリング)+ 入室時 8件/人 = 9,900件に約1.5倍の余裕を見た値。
- * 根拠は docs/20261019-infra.md の WAF 節。
+ * 5分あたり・IP ごとの全リクエスト上限。CloudFront 無料プランは scope-down 付きのレート制限を受け付けないため
+ * (PricingPlanManager が web ACL を "not eligible" と拒否)、全パスを数える。
+ * 社内 NAT の出口 IP 1つの向こうに視聴者300人がいる想定で、1人あたり SPA 初回約45件 + API 33件 + アーカイブ HLS 約30件
+ * = 108件、300人で 32,400件に約1.5倍の余裕を見た値。根拠は docs/20261019-infra.md の WAF 節。
  */
-export const DEFAULT_RATE_LIMIT = 15_000;
-/** レート制限の対象。SPA のアセットや署名付き /files/* (HLS セグメント)は数えない。 */
-export const RATE_LIMIT_PATH_PREFIX = '/api/';
+export const DEFAULT_RATE_LIMIT = 50_000;
 
 const visibility = (metricName: string): wafv2.CfnWebACL.VisibilityConfigProperty => ({
   cloudWatchMetricsEnabled: true,
@@ -43,14 +42,6 @@ export function buildWafRules(rateLimit: number = DEFAULT_RATE_LIMIT): wafv2.Cfn
         aggregateKeyType: 'IP',
         limit: rateLimit,
         evaluationWindowSec: 300,
-        scopeDownStatement: {
-          byteMatchStatement: {
-            fieldToMatch: { uriPath: {} },
-            positionalConstraint: 'STARTS_WITH',
-            searchString: RATE_LIMIT_PATH_PREFIX,
-            textTransformations: [{ priority: 0, type: 'NONE' }],
-          },
-        },
       },
     },
     visibilityConfig: visibility('RateLimitPerIp'),

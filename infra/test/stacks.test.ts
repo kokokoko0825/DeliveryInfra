@@ -505,11 +505,8 @@ describe('stg(既定)', () => {
           Match.objectLike({
             Name: 'RateLimitPerIp',
             Statement: {
-              RateBasedStatement: Match.objectLike({
-                AggregateKeyType: 'IP',
-                Limit: 15_000,
-                ScopeDownStatement: { ByteMatchStatement: Match.objectLike({ PositionalConstraint: 'STARTS_WITH', SearchString: '/api/' }) },
-              }),
+              // 無料プランは scope-down 付きのレート制限を受け付けないため、条件なし(全パス)で数える。
+              RateBasedStatement: { AggregateKeyType: 'IP', Limit: 50_000, EvaluationWindowSec: 300 },
             },
           }),
         ],
