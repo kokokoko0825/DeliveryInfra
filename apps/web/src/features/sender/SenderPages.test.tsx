@@ -36,23 +36,25 @@ describe('CameraSendPage (S-01)', () => {
     expect(getUserMedia.mock.calls[0]?.[0]).toMatchObject({ audio: false, video: { facingMode: { ideal: 'environment' } } });
     expect(screen.getByRole('status')).toHaveTextContent('未接続');
     fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
-    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('送信中'));
+    await screen.findByRole('button', { name: '送信停止' });
     expect(api.requestStageTokens).toHaveBeenCalledWith('camera', 'CAM1', false);
     expect(sessions[0]?.options.tracks).toHaveLength(1);
     expect(sessions[0]?.options.tracks[0]?.track.kind).toBe('video');
     expect(sessions[0]?.options.tracks[0]?.config).toEqual({ maxVideoBitrateKbps: 2000, maxFramerate: 30 });
   });
 
-  it('switches to the front camera and replaces the published track while live', async () => {
+  it('selects the front camera before publishing and sends that track', async () => {
     render(<CameraSendPage />);
     await waitFor(() => expect(getUserMedia).toHaveBeenCalledTimes(1));
     const first = (await getUserMedia.mock.results[0]?.value) as FakeMediaStream;
-    fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
-    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('送信中'));
     fireEvent.click(screen.getByRole('radio', { name: '前面' }));
-    await waitFor(() => expect(sessions[0]?.setPublishTracks).toHaveBeenCalled());
+    await waitFor(() => expect(getUserMedia).toHaveBeenCalledTimes(2));
     expect(first.tracks[0]?.stop).toHaveBeenCalled();
     expect(getUserMedia.mock.calls[1]?.[0]).toMatchObject({ video: { facingMode: { ideal: 'user' } } });
+    const front = (await getUserMedia.mock.results[1]?.value) as FakeMediaStream;
+    fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
+    await screen.findByRole('button', { name: '送信停止' });
+    expect(sessions[0]?.options.tracks[0]?.track).toBe(front.tracks[0]);
   });
 
   it('shows the 7th camera rejection message (F-CAM-06)', async () => {
@@ -108,7 +110,7 @@ describe('CameraSendPage (S-01)', () => {
     fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('CAM1 はあなたの別の端末で送信中です');
     fireEvent.click(screen.getByRole('button', { name: 'この端末に切り替える' }));
-    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('送信中'));
+    await screen.findByRole('button', { name: '送信停止' });
     expect(api.requestStageTokens).toHaveBeenLastCalledWith('camera', 'CAM1', true);
   });
 

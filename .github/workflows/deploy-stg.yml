@@ -30,7 +30,7 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter web exec vitest run src/features/venue/venueAudio.test.ts
+      - run: pnpm --filter web test
       - run: pnpm --filter api exec vitest run src/router.test.ts
       - run: pnpm --filter infra test
       - run: pnpm --filter api build

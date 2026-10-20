@@ -4,6 +4,7 @@
 
 - `apps/api/src/router.test.ts` に venue signaling の role 拒否、PUT 以外の method 拒否、offer/answer と SDP の検証、90 秒 TTL、期限切れ signal、反対側 signal の取得、削除 ownership を追加。
 - `apps/web/src/features/venue/venueAudio.test.ts` に AudioWorklet が same-origin の外部 URL から読み込まれ `blob:` / `data:` URL を使わないこと、mic と speaker の WebRTC 接続・失敗状態を追加。
+- `apps/web/src/features/sender/SenderPages.test.tsx` の3 assertion を、配信中の全画面カメラ UI が `role=status` ではなく「送信停止」ボタンを出す現行動作に合わせた。カメラ切替テストは配信開始前の操作を検証する。
 - `infra/test/edge.test.ts` で CSP の `script-src` に `blob:` と `data:` が含まれないことを明示。
 - CSP による起動失敗を直すため、AudioWorklet を `blob:` URL から同一オリジンの静的ファイルに切り替えた。既存の `script-src` 設定は維持。
 - `.github/workflows/deploy-stg.yml` に PoC の web/API 回帰テストと infra テストを加え、いずれかが失敗したら stg deploy を止める。
@@ -18,7 +19,7 @@
 | `pnpm --filter infra test` | PASS、136 tests |
 | `pnpm --filter web lint && pnpm --filter web typecheck && pnpm --filter web build` | PASS。worklet は独立した `venue-pcm.worklet-<hash>.js` として出力 |
 | `pnpm --filter api typecheck && pnpm --filter api build` | PASS |
-| `pnpm --filter web test` | 443件中440件 PASS。既存 CameraSendPage の3件が失敗し、PoC の venueAudio.test.ts は PASS |
+| `pnpm --filter web test` | PASS、47 files / 443 tests |
 
 ## Stryker / mutation checks
 
