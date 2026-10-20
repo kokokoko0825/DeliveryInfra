@@ -1,0 +1,40 @@
+name: Deploy staging to AWS
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ap-northeast-1
+      CDK_DEFAULT_ACCOUNT: '896784231793'
+      DELIVERY_ENV: stg
+      AWS_ROLE_ARN: arn:aws:iam::896784231793:role/DeliveryInfraGitHubActionsDeployRole
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter api build
+      - run: pnpm --filter web build
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-${{ github.run_id }}
+      - run: pnpm --filter infra exec cdk deploy --all --require-approval never
