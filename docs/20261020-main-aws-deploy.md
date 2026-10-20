@@ -13,9 +13,10 @@ CDK bootstrap の CloudFormation 実行ロールは既存設定で `Administrato
 ## 対象
 
 - `.github/workflows/deploy-stg.yml`
+- `pnpm-workspace.yaml`（pnpm 11でesbuildのインストールスクリプトを許可）
 - AWS IAM OIDC provider: `token.actions.githubusercontent.com`
 - AWS IAM role: `DeliveryInfraGitHubActionsDeployRole`
 
 ## 検証
 
-workflow の初回 main push による実行結果を確認します。
+初回実行では旧pnpm設定形式のためインストール時に停止しました。pnpm 11の `allowBuilds` 形式へ更新し、`pnpm install --frozen-lockfile` が成功することを確認しました。更新後のmain pushでworkflowのデプロイ完了を確認します。
