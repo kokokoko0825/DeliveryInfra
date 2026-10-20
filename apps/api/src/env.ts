@@ -12,8 +12,9 @@ const CloudFrontKeyEnvSchema = z.object({
 export const ApiEnvSchema = CommonEnvSchema.extend({
   USER_POOL_ID: z.string().min(1), USER_POOL_CLIENT_ID: z.string().min(1), TABLE_NAME: z.string().min(1),
   STAGE_PRODUCTION_ARN: z.string().min(1), STAGE_SLIDE_ARN: z.string().min(1), STAGE_BROADCAST_ARN: z.string().min(1),
-  CHAT_ROOM_ARN: z.string().min(1), CONTENT_BUCKET: z.string().min(1), RECORDING_BUCKET: z.string().min(1),
-  RECORDING_STORAGE_CONFIGURATION_ARN: z.string().min(1), ENCODER_CONFIGURATION_ARN: z.string().min(1),
+  // Chat Room と StorageConfiguration は ARN を参照すると CloudFormation が循環するため名前で受け取る(resources.ts で解決)。
+  CHAT_ROOM_NAME: z.string().min(1), CONTENT_BUCKET: z.string().min(1), RECORDING_BUCKET: z.string().min(1),
+  RECORDING_STORAGE_CONFIGURATION_NAME: z.string().min(1), ENCODER_CONFIGURATION_ARN: z.string().min(1),
 }).merge(CloudFrontKeyEnvSchema);
 export const ChatReviewEnvSchema = CommonEnvSchema.extend({ TABLE_NAME: z.string().min(1) });
 export const RecordingEnvSchema = CommonEnvSchema.extend({

@@ -6,10 +6,10 @@ import {
 } from '@aws-sdk/client-cognito-identity-provider';
 import {
   CreateParticipantTokenCommand, DisconnectParticipantCommand, GetCompositionCommand, GetStageCommand, IVSRealTimeClient, ListParticipantsCommand,
-  ListStageSessionsCommand, StartCompositionCommand, StopCompositionCommand,
+  ListStageSessionsCommand, ListStorageConfigurationsCommand, StartCompositionCommand, StopCompositionCommand,
 } from '@aws-sdk/client-ivs-realtime';
 import {
-  CreateChatTokenCommand, DeleteMessageCommand, DisconnectUserCommand, GetRoomCommand, IvschatClient, SendEventCommand,
+  CreateChatTokenCommand, DeleteMessageCommand, DisconnectUserCommand, GetRoomCommand, IvschatClient, ListRoomsCommand, SendEventCommand,
 } from '@aws-sdk/client-ivschat';
 import {
   DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, S3Client,
@@ -22,7 +22,7 @@ import {
 import { mockClient } from 'aws-sdk-client-mock';
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
 import { vi } from 'vitest';
-import { ENV, REGION, TABLE_INDEXES } from './environment';
+import { ENV, RECORDING_STORAGE_CONFIGURATION_ARN, REGION, TABLE_INDEXES } from './environment';
 import { FakeDynamoDB } from './fake-dynamodb';
 
 const GROUPS = ['admin', 'camera', 'audio', 'presenter', 'viewer'];
@@ -246,7 +246,7 @@ export class FakeIvs {
   startComposition(input: StartCompositionCommand['input']) {
     if (input.stageArn !== ENV.STAGE_BROADCAST_ARN) throw awsError('ValidationException', 'composition must use the broadcast stage');
     const s3 = input.destinations?.[0]?.s3;
-    if (s3?.storageConfigurationArn !== ENV.RECORDING_STORAGE_CONFIGURATION_ARN) throw awsError('ValidationException', 'storageConfigurationArn');
+    if (s3?.storageConfigurationArn !== RECORDING_STORAGE_CONFIGURATION_ARN) throw awsError('ValidationException', 'storageConfigurationArn');
     if (JSON.stringify(s3.encoderConfigurationArns) !== JSON.stringify([ENV.ENCODER_CONFIGURATION_ARN])) throw awsError('ValidationException', 'encoderConfigurationArns');
     if (s3.recordingConfiguration?.hlsConfiguration?.targetSegmentDurationSeconds !== 10) throw awsError('ValidationException', 'hls segment');
     if ([...this.compositions.values()].some((composition) => composition.state === 'ACTIVE')) throw awsError('ConflictException', 'composition already active');
@@ -284,6 +284,12 @@ export class FakeIvs {
     composition.state = 'STOPPED';
     composition.endTime = new Date();
     return {};
+  }
+
+  /** 2ページに分けて返し、API がページングして名前で選ぶことを確かめる。 */
+  listStorageConfigurations(input: ListStorageConfigurationsCommand['input']) {
+    if (!input.nextToken) return { storageConfigurations: [{ name: 'other-recording', arn: `${RECORDING_STORAGE_CONFIGURATION_ARN}-other` }], nextToken: 'page2' };
+    return { storageConfigurations: [{ name: ENV.RECORDING_STORAGE_CONFIGURATION_NAME, arn: RECORDING_STORAGE_CONFIGURATION_ARN }] };
   }
 
   getComposition(input: GetCompositionCommand['input']) {
@@ -334,6 +340,12 @@ export class FakeChat {
     this.room(input.roomIdentifier);
     this.disconnected.push(input.userId!);
     return {};
+  }
+
+  /** name は部分一致のフィルタ。名前の似た別ルームも返し、API が完全一致で選ぶことを確かめる。 */
+  listRooms(input: ListRoomsCommand['input']) {
+    const rooms = [{ name: `${ENV.CHAT_ROOM_NAME}-old`, arn: `${ENV.CHAT_ROOM_ARN}-old` }, { name: ENV.CHAT_ROOM_NAME, arn: ENV.CHAT_ROOM_ARN }];
+    return { rooms: rooms.filter((room) => !input.name || room.name.includes(input.name)) };
   }
 
   getRoom(input: GetRoomCommand['input']) {
@@ -490,12 +502,14 @@ export function createWorld(): World {
     .on(ListStageSessionsCommand).callsFake((input) => ivs.listSessions(input))
     .on(StartCompositionCommand).callsFake((input) => ivs.startComposition(input))
     .on(StopCompositionCommand).callsFake((input) => ivs.stopComposition(input))
-    .on(GetCompositionCommand).callsFake((input) => ivs.getComposition(input));
+    .on(GetCompositionCommand).callsFake((input) => ivs.getComposition(input))
+    .on(ListStorageConfigurationsCommand).callsFake((input) => ivs.listStorageConfigurations(input));
   mocks.chat.on(SendEventCommand).callsFake((input) => chat.sendEvent(input))
     .on(CreateChatTokenCommand).callsFake((input) => chat.createToken(input))
     .on(DeleteMessageCommand).callsFake((input) => chat.deleteMessage(input))
     .on(DisconnectUserCommand).callsFake((input) => chat.disconnectUser(input))
-    .on(GetRoomCommand).callsFake((input) => chat.getRoom(input));
+    .on(GetRoomCommand).callsFake((input) => chat.getRoom(input))
+    .on(ListRoomsCommand).callsFake((input) => chat.listRooms(input));
   mocks.s3.on(HeadObjectCommand).callsFake((input) => s3.head(input))
     .on(GetObjectCommand).callsFake((input) => s3.get(input))
     .on(ListObjectsV2Command).callsFake((input) => s3.list(input))

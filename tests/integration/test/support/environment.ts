@@ -1,5 +1,5 @@
 /**
- * API Lambda が読む環境変数(infra の buildLambdaEnvironment と同じキー)。値はダミー。
+ * API / recording Lambda が読む環境変数(infra の buildLambdaEnvironment と同じキー)。値はダミー。
  * 認証情報は presigned POST の署名計算にだけ使われる(通信はすべてモック)。
  */
 export const REGION = 'ap-northeast-1';
@@ -15,15 +15,20 @@ export const ENV = {
   STAGE_PRODUCTION_ARN: `arn:aws:ivs:${REGION}:${ACCOUNT}:stage/production`,
   STAGE_SLIDE_ARN: `arn:aws:ivs:${REGION}:${ACCOUNT}:stage/slide`,
   STAGE_BROADCAST_ARN: `arn:aws:ivs:${REGION}:${ACCOUNT}:stage/broadcast`,
+  /** recording が使う。api は CHAT_ROOM_NAME から ListRooms でこの ARN を引く。 */
   CHAT_ROOM_ARN: `arn:aws:ivschat:${REGION}:${ACCOUNT}:room/room1`,
+  CHAT_ROOM_NAME: 'delivery-integration-room',
   CONTENT_BUCKET: 'delivery-integration-content',
   RECORDING_BUCKET: 'delivery-integration-recording',
-  RECORDING_STORAGE_CONFIGURATION_ARN: `arn:aws:ivs:${REGION}:${ACCOUNT}:storage-configuration/storage1`,
+  RECORDING_STORAGE_CONFIGURATION_NAME: 'delivery-integration-recording',
   ENCODER_CONFIGURATION_ARN: `arn:aws:ivs:${REGION}:${ACCOUNT}:encoder-configuration/encoder1`,
   CLOUDFRONT_KEY_PAIR_ID: 'K2INTEGRATION',
   CLOUDFRONT_KEY_GROUP_ID: 'key-group-1',
   CLOUDFRONT_PRIVATE_KEY_PARAMETER: '/delivery-integration/cloudfront/private-key',
 } as const;
+
+/** api は StorageConfiguration を名前で受け取り、ListStorageConfigurations でこの ARN を引く。 */
+export const RECORDING_STORAGE_CONFIGURATION_ARN = `arn:aws:ivs:${REGION}:${ACCOUNT}:storage-configuration/storage1`;
 
 /**
  * API が前提とする GSI。フェイクの DynamoDB は未定義の IndexName を拒否し(API 通しテストが落ちる)、

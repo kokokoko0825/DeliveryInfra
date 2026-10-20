@@ -59,11 +59,13 @@ API 側で新たに必要な権限: `api` に `ivs:DisconnectParticipant`・`ivs
 
 | 関数 | 環境変数 |
 | --- | --- |
-| `api` | `NODE_ENV`, `USER_POOL_ID`, `USER_POOL_CLIENT_ID`, `TABLE_NAME`, `STAGE_PRODUCTION_ARN`, `STAGE_SLIDE_ARN`, `STAGE_BROADCAST_ARN`, `CHAT_ROOM_ARN`, `CONTENT_BUCKET`, `RECORDING_BUCKET`, `RECORDING_STORAGE_CONFIGURATION_ARN`, `ENCODER_CONFIGURATION_ARN`, `CLOUDFRONT_KEY_PAIR_ID`, `CLOUDFRONT_PRIVATE_KEY_PARAMETER`（`CLOUDFRONT_KEY_GROUP_ID` は未使用のため削除、R1-25） |
+| `api` | `NODE_ENV`, `USER_POOL_ID`, `USER_POOL_CLIENT_ID`, `TABLE_NAME`, `STAGE_PRODUCTION_ARN`, `STAGE_SLIDE_ARN`, `STAGE_BROADCAST_ARN`, `CHAT_ROOM_NAME`, `CONTENT_BUCKET`, `RECORDING_BUCKET`, `RECORDING_STORAGE_CONFIGURATION_NAME`, `ENCODER_CONFIGURATION_ARN`, `CLOUDFRONT_KEY_PAIR_ID`, `CLOUDFRONT_PRIVATE_KEY_PARAMETER`（`CLOUDFRONT_KEY_GROUP_ID` は未使用のため削除、R1-25） |
 | `chat-review` | `NODE_ENV`, `TABLE_NAME` |
 | `recording` | `NODE_ENV`, `TABLE_NAME`, `RECORDING_BUCKET`, `CHAT_ROOM_ARN`, `STAGE_BROADCAST_ARN` |
 | `cognito-trigger` | `NODE_ENV`, `TABLE_NAME` |
 | `archive-expiry` | `NODE_ENV`, `RECORDING_BUCKET` |
+
+`api` は Chat Room と録画 StorageConfiguration を ARN ではなく名前（例: stg は `delivery-stg-room` / `delivery-stg-recording`）で受け取る。ARN を CloudFormation で参照すると「バケットポリシー → Distribution → API 関数URL → api → StorageConfiguration / Chat Room → バケットポリシー」と循環するため。`apps/api/src/resources.ts` が初回利用時に `ListRooms`（`name` で絞り込み）/ `ListStorageConfigurations` をページングして名前が完全一致する1件の ARN を引き、モジュールスコープでキャッシュする。0件は `ResourceNotFoundException`（`/api/status` では `chatRoom.exists: false`）、複数件はエラー。失敗した解決はキャッシュせず次のリクエストで引き直す。
 
 API の署名Cookie発行は CloudFront Function が設定する `x-forwarded-host` を使う。値は `^[a-z0-9]+\.cloudfront\.net$` のみ許可し、違反は構造化ログを記録して内部エラーとして拒否する。Cookie は**カスタムポリシー**（`Resource` ワイルドカード + `DateLessThan`、有効1時間）で署名し、`CloudFront-Policy` / `CloudFront-Signature` / `CloudFront-Key-Pair-Id` を `Path=<範囲>; Max-Age=3600; Secure; HttpOnly; SameSite=Strict` で返す（canned policy はワイルドカード不可のため使わない。INT-01）。
 
@@ -83,7 +85,7 @@ Cognitoトリガーは `PostConfirmation_ConfirmSignUp` で外部IdPユーザー
 ## AWS API仕様確認
 
 - IVS Real-Time の `CreateParticipantToken` は短いdurationと必要なcapabilityを指定する。`ListParticipants` は `stageArn` と `sessionId` を使い、現在の配信セッションの視聴者数を数える。
-- IVS `StartComposition` のS3 destinationに StorageConfiguration ARN、EncoderConfiguration ARN、HLS `targetSegmentDurationSeconds: 10` を渡す。終了イベントは `IVS Composition State Change / Session End`。GetCompositionのS3 `recordingPrefix` に沿ってHLSプレイリストを参照する。
+- IVS `StartComposition` のS3 destinationに StorageConfiguration ARN（`RECORDING_STORAGE_CONFIGURATION_NAME` から解決）、EncoderConfiguration ARN、HLS `targetSegmentDurationSeconds: 10` を渡す。終了イベントは `IVS Composition State Change / Session End`。GetCompositionのS3 `recordingPrefix` に沿ってHLSプレイリストを参照する。
 - S3 presigned POST は `content-length-range` と `Content-Type` を固定する。完了APIは `HeadObject` と `GetObject Range: bytes=0-4` でサイズと `%PDF-` を検査する。
 - IVS Chat message review Lambda は `Content`, `ReviewResult`, `Attributes` を返す。拒否理由は `Attributes.Reason` に入れる。許可時はクライアント指定の属性を捨て、`Attributes.displayName` を保存済みの表示名で上書きする（R1-04）。
 - `StopComposition` は Composition が自動停止・削除済みだと `ResourceNotFoundException` を返す。この場合は停止済みとして `ended` に進める（R1-03）。

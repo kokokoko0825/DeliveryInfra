@@ -287,6 +287,12 @@ describe('stg(既定)', () => {
       expect(env('ApiFunction')).toMatchObject({ CLOUDFRONT_PRIVATE_KEY_PARAMETER: '/delivery-stg/cloudfront/private-key' });
       expect(env('ApiFunction')).not.toHaveProperty('CLOUDFRONT_DOMAIN');
       expect(env('ApiFunction')).not.toHaveProperty('CLOUDFRONT_KEY_GROUP_ID');
+      // ARN ではなく固定名を渡し、apps/api が List API で解決する(循環参照回避)。
+      expect(env('ApiFunction')).toMatchObject({ CHAT_ROOM_NAME: 'delivery-stg-room', RECORDING_STORAGE_CONFIGURATION_NAME: 'delivery-stg-recording' });
+      expect(env('ApiFunction')).not.toHaveProperty('CHAT_ROOM_ARN');
+      expect(env('ApiFunction')).not.toHaveProperty('RECORDING_STORAGE_CONFIGURATION_ARN');
+      t.main.hasResourceProperties('AWS::IVSChat::Room', { Name: 'delivery-stg-room' });
+      t.main.hasResourceProperties('AWS::IVS::StorageConfiguration', { Name: 'delivery-stg-recording' });
       expect(Object.keys(env('ArchiveExpiryFunction')).sort()).toEqual(['NODE_ENV', 'RECORDING_BUCKET']);
     });
   });
@@ -304,9 +310,12 @@ describe('stg(既定)', () => {
         for (const action of [s.Action].flat()) expect(action).not.toMatch(/(^\*$|:\*$)/);
       }
     });
-    it('Resource "*" は CDK 内部のみ（アプリの Lambda は持たない、R4-07）', () => {
+    it('Resource "*" は CDK 内部と、リソースを絞れない api の名前解決(List)だけ（R4-07）', () => {
       const wildcard = statements().filter((s) => s.Resource === '*');
-      for (const s of wildcard) expect(s.id).toMatch(/^(AWS|Custom|CustomCDKBucketDeployment)/);
+      const app = wildcard.filter((s) => !/^(AWS|Custom|CustomCDKBucketDeployment)/.test(s.id));
+      expect(app.map((s) => ({ id: s.id, Action: s.Action }))).toEqual([
+        { id: expect.stringMatching(/^ApiFunction/), Action: ['ivs:ListStorageConfigurations', 'ivschat:ListRooms'] },
+      ]);
     });
     it('api: 未使用の Composition 取得・一覧と comment-exports への権限を持たない（R4-07）', () => {
       const actions = policyOf('ApiFunction').flatMap((s) => [s.Action].flat());
@@ -335,9 +344,29 @@ describe('stg(既定)', () => {
         Action: ['ivs:CreateParticipantToken', 'ivs:DisconnectParticipant', 'ivs:GetStage', 'ivs:ListParticipants', 'ivs:ListStageSessions'],
         Resource: stages,
       });
-      expect(policyOf('ApiFunction')).toContainEqual(
-        expect.objectContaining({ Action: expect.arrayContaining(['ivschat:GetRoom']), Resource: { 'Fn::GetAtt': [expect.stringMatching(/^ChatRoom/), 'Arn'] } }),
-      );
+      expect(policyOf('ApiFunction')).toContainEqual({
+        Effect: 'Allow',
+        Action: ['ivschat:CreateChatToken', 'ivschat:DeleteMessage', 'ivschat:DisconnectUser', 'ivschat:GetRoom', 'ivschat:SendEvent'],
+        Resource: 'arn:aws:ivschat:ap-northeast-1:123456789012:room/*',
+      });
+    });
+    it('api: 録画開始は配信ステージ・エンコーダー・同アカウントの StorageConfiguration・Composition に限定', () => {
+      expect(policyOf('ApiFunction')).toContainEqual({
+        Effect: 'Allow',
+        Action: 'ivs:StartComposition',
+        Resource: [
+          'arn:aws:ivs:ap-northeast-1:123456789012:composition/*',
+          'arn:aws:ivs:ap-northeast-1:123456789012:storage-configuration/*',
+          { 'Fn::GetAtt': ['EncoderConfiguration', 'Arn'] },
+          { 'Fn::GetAtt': ['Stagebroadcast', 'Arn'] },
+        ],
+      });
+    });
+    it('api: Chat Room / StorageConfiguration を参照しない(バケットポリシー → Distribution → api の循環回避)', () => {
+      const api = resourcesOf(t.main, 'AWS::Lambda::Function').find(([id]) => id.startsWith('ApiFunction'))![1];
+      const policies = resourcesOf(t.main, 'AWS::IAM::Policy').filter(([id]) => id.startsWith('ApiFunction'));
+      expect(policies.length).toBeGreaterThan(0);
+      for (const value of [api, ...policies.map(([, p]) => p)]) expect(JSON.stringify(value)).not.toMatch(/"(ChatRoom|StorageConfiguration)[0-9A-F]*"/);
     });
     it('recording: GetComposition は composition/* のみ', () => {
       expect(policyOf('RecordingFunction')).toContainEqual({
@@ -495,6 +524,21 @@ describe('stg(既定)', () => {
     });
   });
 
+  it('IVS の録画設定と Chat ログ設定は、CDK のバケットポリシー作成後に作る(policy already exists 回避)', () => {
+    const json = t.main.toJSON() as { Resources: Record<string, { Type: string; DependsOn?: string[]; Properties?: { Bucket?: { Ref?: string } } }> };
+    const policyOf = (bucketPrefix: string) =>
+      Object.entries(json.Resources).find(([, r]) => r.Type === 'AWS::S3::BucketPolicy' && r.Properties?.Bucket?.Ref?.startsWith(bucketPrefix))![0];
+    const dependsOf = (type: string) => Object.values(json.Resources).find((r) => r.Type === type)!.DependsOn ?? [];
+    expect(dependsOf('AWS::IVS::StorageConfiguration')).toContain(policyOf('RecordingBucket'));
+    expect(dependsOf('AWS::IVSChat::LoggingConfiguration')).toContain(policyOf('ContentBucket'));
+  });
+
+  it('stg のバケットは中身ごと削除できる(ロールバック時の DELETE_FAILED 回避)', () => {
+    const buckets = Object.values(t.main.findResources('AWS::S3::Bucket')) as { Properties: { Tags?: { Key: string; Value: string }[] } }[];
+    expect(buckets.length).toBeGreaterThan(0);
+    for (const b of buckets) expect(b.Properties.Tags).toContainEqual({ Key: 'aws-cdk:auto-delete-objects', Value: 'true' });
+  });
+
   it('CloudTrail 証跡1つ → ログバケット', () => {
     t.main.resourceCountIs('AWS::CloudTrail::Trail', 1);
     t.main.hasResourceProperties('AWS::CloudTrail::Trail', {
@@ -550,6 +594,10 @@ describe('Okta 連携あり・prod', () => {
       cloudFrontFreePlan: 'false',
       cloudTrail: 'false',
     });
+  });
+
+  it('prod のバケットは自動削除しない(データ保持)', () => {
+    expect(Object.keys(t.main.findResources('Custom::S3AutoDeleteObjects'))).toHaveLength(0);
   });
 
   it('IdP はカスタムリソースで作り、テンプレートに secret を含めない', () => {

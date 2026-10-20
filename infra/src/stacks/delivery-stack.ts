@@ -96,6 +96,8 @@ export class DeliveryStack extends Stack {
         minimumTLSVersion: 1.2,
         objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
         removalPolicy,
+        // データを残さない環境(stg)では、ロールバック・削除時に中身ごと消す(中身があると DELETE_FAILED になる)。
+        autoDeleteObjects: !config.retainData,
         ...extra,
       });
 
@@ -266,25 +268,32 @@ export class DeliveryStack extends Stack {
       name: `${config.prefix}-program-720p30`,
       video: ENCODER_VIDEO,
     });
+    // api は ARN ではなくこの名前で引く(ARN を参照すると循環する。app-config.ts の buildLambdaEnvironment)。
+    const storageConfigurationName = `${config.prefix}-recording`;
+    const chatRoomName = `${config.prefix}-room`;
     const storage = new ivs.CfnStorageConfiguration(this, 'StorageConfiguration', {
-      name: `${config.prefix}-recording`,
+      name: storageConfigurationName,
       s3: { bucketName: recordingBucket.bucketName },
     });
+    // IVS は作成時にバケットポリシーへ書き込むため、CDK のポリシーを先に作る(後だと "policy already exists" で失敗する)。
+    storage.node.addDependency(recordingBucket.policy!);
 
     // ---------- IVS Chat ----------
     const chatLogging = new ivschat.CfnLoggingConfiguration(this, 'ChatLogging', {
       name: `${config.prefix}-chat-logs`,
       destinationConfiguration: { s3: { bucketName: contentBucket.bucketName } },
     });
+    chatLogging.node.addDependency(contentBucket.policy!);
+    const anyChatRoomArn = `arn:${this.partition}:ivschat:${this.region}:${this.account}:room/*`;
     const chatReviewPermission = new lambda.CfnPermission(this, 'ChatReviewInvokePermission', {
       action: 'lambda:InvokeFunction',
       functionName: chatReviewFn.functionArn,
       principal: 'ivschat.amazonaws.com',
       sourceAccount: this.account,
-      sourceArn: `arn:${this.partition}:ivschat:${this.region}:${this.account}:room/*`,
+      sourceArn: anyChatRoomArn,
     });
     const chatRoom = new ivschat.CfnRoom(this, 'ChatRoom', {
-      name: `${config.prefix}-room`,
+      name: chatRoomName,
       maximumMessageLength: 200,
       messageReviewHandler: { uri: chatReviewFn.functionArn, fallbackResult: 'DENY' },
       loggingConfigurationIdentifiers: [chatLogging.attrArn],
@@ -313,9 +322,10 @@ export class DeliveryStack extends Stack {
       stageSlideArn: slideStage.attrArn,
       stageBroadcastArn: broadcastStage.attrArn,
       chatRoomArn: chatRoom.attrArn,
+      chatRoomName,
       contentBucket: contentBucket.bucketName,
       recordingBucket: recordingBucket.bucketName,
-      storageConfigurationArn: storage.attrArn,
+      storageConfigurationName,
       encoderConfigurationArn: encoder.attrArn,
       cloudFrontKeyPairId: publicKey.publicKeyId,
       cloudFrontPrivateKeyParameter: config.cloudFrontPrivateKeyParameter,
@@ -333,6 +343,8 @@ export class DeliveryStack extends Stack {
 
     const stageArns = [productionStage.attrArn, slideStage.attrArn, broadcastStage.attrArn];
     const compositionArn = `arn:${this.partition}:ivs:${this.region}:${this.account}:composition/*`;
+    // api は Chat Room / StorageConfiguration を参照できない(循環する)ため、同アカウント・同リージョンのワイルドカードで許可する。
+    const anyStorageConfigurationArn = `arn:${this.partition}:ivs:${this.region}:${this.account}:storage-configuration/*`;
     table.grantReadWriteData(apiFn);
     table.grantReadWriteData(chatReviewFn);
     table.grantReadWriteData(recordingFn);
@@ -371,15 +383,19 @@ export class DeliveryStack extends Stack {
     apiFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['ivs:StartComposition'],
-        resources: [broadcastStage.attrArn, encoder.attrArn, storage.attrArn, compositionArn],
+        resources: [broadcastStage.attrArn, encoder.attrArn, anyStorageConfigurationArn, compositionArn],
       }),
+    );
+    // 名前 → ARN の解決(apps/api/src/resources.ts)。List 系はリソースを絞れない。
+    apiFn.addToRolePolicy(
+      new iam.PolicyStatement({ actions: ['ivs:ListStorageConfigurations', 'ivschat:ListRooms'], resources: ['*'] }),
     );
     // GetComposition は recording Lambda だけが使い、ListCompositions はどこからも使わない（R4-07）
     apiFn.addToRolePolicy(new iam.PolicyStatement({ actions: ['ivs:StopComposition'], resources: [compositionArn] }));
     apiFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['ivschat:CreateChatToken', 'ivschat:SendEvent', 'ivschat:DeleteMessage', 'ivschat:DisconnectUser', 'ivschat:GetRoom'],
-        resources: [chatRoom.attrArn],
+        resources: [anyChatRoomArn],
       }),
     );
     apiFn.addToRolePolicy(

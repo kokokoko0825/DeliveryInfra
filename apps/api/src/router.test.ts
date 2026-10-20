@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockClient } from 'aws-sdk-client-mock';
 import { BatchGetCommand, DeleteCommand, GetCommand, PutCommand, QueryCommand, ScanCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import { CreateParticipantTokenCommand, DisconnectParticipantCommand, GetStageCommand, ListParticipantsCommand, ListStageSessionsCommand, StartCompositionCommand, StopCompositionCommand } from '@aws-sdk/client-ivs-realtime';
-import { CreateChatTokenCommand, DeleteMessageCommand, DisconnectUserCommand, GetRoomCommand, SendEventCommand } from '@aws-sdk/client-ivschat';
+import { CreateParticipantTokenCommand, DisconnectParticipantCommand, GetStageCommand, ListParticipantsCommand, ListStageSessionsCommand, ListStorageConfigurationsCommand, StartCompositionCommand, StopCompositionCommand } from '@aws-sdk/client-ivs-realtime';
+import { CreateChatTokenCommand, DeleteMessageCommand, DisconnectUserCommand, GetRoomCommand, ListRoomsCommand, SendEventCommand } from '@aws-sdk/client-ivschat';
 import { DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { GetParameterCommand } from '@aws-sdk/client-ssm';
 import { AdminAddUserToGroupCommand, AdminCreateUserCommand, AdminDeleteUserCommand, AdminDisableUserCommand, AdminEnableUserCommand, AdminGetUserCommand, AdminListGroupsForUserCommand, AdminRemoveUserFromGroupCommand, AdminUserGlobalSignOutCommand, ListUsersCommand, ListUsersInGroupCommand } from '@aws-sdk/client-cognito-identity-provider';
@@ -14,8 +14,9 @@ import { createClients } from './aws';
 import { ApiEnvSchema } from './env';
 import { createApiHandler, type FunctionUrlEvent } from './router';
 import { HttpError } from './errors';
+import { resetResourceArnCache } from './resources';
 
-const env = ApiEnvSchema.parse({ USER_POOL_ID: 'pool', USER_POOL_CLIENT_ID: 'client', TABLE_NAME: 'table', STAGE_PRODUCTION_ARN: 'prod', STAGE_SLIDE_ARN: 'slide', STAGE_BROADCAST_ARN: 'broadcast', CHAT_ROOM_ARN: 'room', CONTENT_BUCKET: 'content', RECORDING_BUCKET: 'recording', RECORDING_STORAGE_CONFIGURATION_ARN: 'storage', ENCODER_CONFIGURATION_ARN: 'encoder', CLOUDFRONT_KEY_PAIR_ID: 'key', CLOUDFRONT_PRIVATE_KEY_PARAMETER: 'parameter' });
+const env = ApiEnvSchema.parse({ USER_POOL_ID: 'pool', USER_POOL_CLIENT_ID: 'client', TABLE_NAME: 'table', STAGE_PRODUCTION_ARN: 'prod', STAGE_SLIDE_ARN: 'slide', STAGE_BROADCAST_ARN: 'broadcast', CHAT_ROOM_NAME: 'room-name', CONTENT_BUCKET: 'content', RECORDING_BUCKET: 'recording', RECORDING_STORAGE_CONFIGURATION_NAME: 'storage-name', ENCODER_CONFIGURATION_ARN: 'encoder', CLOUDFRONT_KEY_PAIR_ID: 'key', CLOUDFRONT_PRIVATE_KEY_PARAMETER: 'parameter' });
 const clients = createClients(env);
 const ddb = mockClient(clients.ddb);
 const ivs = mockClient(clients.ivs);
@@ -43,6 +44,9 @@ const lease = (sk: string, extra: Record<string, unknown> = {}) => ({ PK: 'DEVIC
 
 beforeEach(() => {
   ddb.reset(); ivs.reset(); chat.reset(); s3.reset(); cognito.reset(); ssm.reset();
+  resetResourceArnCache();
+  chat.on(ListRoomsCommand).resolves({ rooms: [{ name: 'room-name', arn: 'room' }] });
+  ivs.on(ListStorageConfigurationsCommand).resolves({ storageConfigurations: [{ name: 'storage-name', arn: 'storage' }] });
   vi.mocked(getSignedCookies).mockClear();
   ddb.on(QueryCommand).resolves({ Items: [] });
   ddb.on(GetCommand).resolves({});
@@ -589,6 +593,28 @@ describe('API router endpoint behavior', () => {
     ivs.on(ListStageSessionsCommand).resolves({ stageSessions: [{ sessionId: 'old', endTime: new Date('2026-01-01T00:00:00Z') }] });
     chat.on(GetRoomCommand).resolves({ arn: 'room' });
     expect(data(await request('admin', 'GET', '/status'))).toEqual({ stages: ['production', 'slide', 'broadcast'].map((name) => ({ name, exists: true, status: 'IDLE' })), chatRoom: { exists: true, status: 'ACTIVE' } });
+  });
+
+  it('resolves the chat room by name and reports a room missing from ListRooms as not existing', async () => {
+    ivs.on(GetStageCommand).resolves({ stage: { arn: 'x' } });
+    ivs.on(ListStageSessionsCommand).resolves({ stageSessions: [] });
+    chat.on(GetRoomCommand).resolves({ arn: 'room' });
+    chat.on(ListRoomsCommand).resolves({ rooms: [{ name: 'room-name-old', arn: 'old' }] });
+    expect(data(await request('admin', 'GET', '/status')).chatRoom).toEqual({ exists: false });
+    expect(chat.commandCalls(GetRoomCommand)).toHaveLength(0);
+    chat.on(ListRoomsCommand).resolves({ rooms: [{ name: 'room-name', arn: 'room' }] });
+    expect(data(await request('admin', 'GET', '/status')).chatRoom).toEqual({ exists: true, status: 'ACTIVE' });
+    expect(data(await request('admin', 'GET', '/status')).chatRoom).toEqual({ exists: true, status: 'ACTIVE' });
+    expect(chat.commandCalls(ListRoomsCommand).map((call) => call.args[0].input)).toEqual([{ name: 'room-name' }, { name: 'room-name' }]);
+    expect(chat.commandCalls(GetRoomCommand).map((call) => call.args[0].input)).toEqual([{ identifier: 'room' }, { identifier: 'room' }]);
+  });
+
+  it('fails the broadcast start when the storage configuration cannot be resolved by name', async () => {
+    ivs.on(ListStorageConfigurationsCommand).resolves({ storageConfigurations: [{ name: 'storage-name', arn: 'a' }, { name: 'storage-name', arn: 'b' }] });
+    const response = await request('admin', 'POST', '/broadcast/start', { title: '配信' });
+    expect(response.statusCode).toBe(500);
+    expect(ivs.commandCalls(StartCompositionCommand)).toHaveLength(0);
+    expect(ddb.commandCalls(DeleteCommand)).toHaveLength(1);
   });
 
   it.each([

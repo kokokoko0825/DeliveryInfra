@@ -102,6 +102,17 @@ describe('Infra(CDK synth) ↔ API(ビルド出力・環境変数)', () => {
     expect(variables).not.toHaveProperty('AWS_REGION');
   });
 
+  it('api は Chat Room / StorageConfiguration を ARN ではなく CDK と同じ名前で受け取る(循環参照回避)', () => {
+    const variables = (resources[functionFor('api')!]!.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+    const [[, room]] = ofType('AWS::IVSChat::Room') as [[string, Resource]];
+    const [[, storage]] = ofType('AWS::IVS::StorageConfiguration') as [[string, Resource]];
+    expect(typeof room.Properties.Name).toBe('string');
+    expect(typeof storage.Properties.Name).toBe('string');
+    expect(variables.CHAT_ROOM_NAME).toBe(room.Properties.Name);
+    expect(variables.RECORDING_STORAGE_CONFIGURATION_NAME).toBe(storage.Properties.Name);
+    expect(Object.values(variables).every((value) => typeof value !== 'object' || !/"(ChatRoom|StorageConfiguration)/u.test(JSON.stringify(value)))).toBe(true);
+  });
+
   it('テーブルの GSI は API が前提とするもの(TABLE_INDEXES)と完全に一致する', () => {
     const [[, table]] = [...ofType('AWS::DynamoDB::GlobalTable'), ...ofType('AWS::DynamoDB::Table')] as [[string, Resource]];
     const indexes = (table.Properties.GlobalSecondaryIndexes as { IndexName: string; KeySchema: { AttributeName: string; KeyType: string }[] }[] | undefined) ?? [];

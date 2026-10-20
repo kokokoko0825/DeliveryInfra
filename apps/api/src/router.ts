@@ -29,6 +29,7 @@ import { createClients, type Clients } from './aws';
 import { Database, isConditionalFailure, KEYS, makeDatabase, type Entity } from './database';
 import { getApiEnv, type Env } from './env';
 import { badRequest, conflict, forbidden, HttpError, notFound } from './errors';
+import { resolveChatRoomArn, resolveStorageConfigurationArn } from './resources';
 import { deletePrefix } from './storage';
 
 export interface FunctionUrlEvent {
@@ -102,6 +103,7 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
   const getEnvValue = () => envValue ??= getApiEnv();
   const getClients = () => clientsValue ??= createClients(getEnvValue());
   const getDb = () => dbValue ??= makeDatabase(getClients().ddb, getEnvValue());
+  const chatRoomArn = () => resolveChatRoomArn(getClients().chat, getEnvValue().CHAT_ROOM_NAME);
   const now = dependencies?.now ?? Date.now;
   const nowSeconds = () => Math.floor(now() / 1000);
   const auth = dependencies?.authenticate ?? authenticate;
@@ -121,7 +123,7 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
     try {
       for (let attempt = 0; ; attempt += 1) {
         try {
-          const command = new SendEventCommand({ roomIdentifier: getEnvValue().CHAT_ROOM_ARN, eventName: validated.eventName });
+          const command = new SendEventCommand({ roomIdentifier: await Promise.race([chatRoomArn(), expired]), eventName: validated.eventName });
           await Promise.race([getClients().chat.send(command, { abortSignal: controller.signal }), expired]);
           return;
         } catch (error) {
@@ -336,7 +338,7 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
           idempotencyToken: broadcastId,
           destinations: [{
             name: 'recording',
-            s3: { storageConfigurationArn: env.RECORDING_STORAGE_CONFIGURATION_ARN, encoderConfigurationArns: [env.ENCODER_CONFIGURATION_ARN], recordingConfiguration: { hlsConfiguration: { targetSegmentDurationSeconds: 10 }, format: 'HLS' } },
+            s3: { storageConfigurationArn: await resolveStorageConfigurationArn(clients.ivs, env.RECORDING_STORAGE_CONFIGURATION_NAME), encoderConfigurationArns: [env.ENCODER_CONFIGURATION_ARN], recordingConfiguration: { hlsConfiguration: { targetSegmentDurationSeconds: 10 }, format: 'HLS' } },
           }],
         }));
         compositionArn = start.composition?.arn;
@@ -402,7 +404,7 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
         return { name, exists: Boolean(stage.stage), status: active ? 'ACTIVE' : 'IDLE' };
       }));
       let chatRoom: { exists: boolean; status?: string };
-      try { chatRoom = { exists: Boolean((await clients.chat.send(new GetRoomCommand({ identifier: env.CHAT_ROOM_ARN }))).arn), status: 'ACTIVE' }; }
+      try { chatRoom = { exists: Boolean((await clients.chat.send(new GetRoomCommand({ identifier: await chatRoomArn() }))).arn), status: 'ACTIVE' }; }
       catch (error) { if (!isResourceNotFound(error)) throw error; chatRoom = { exists: false }; }
       return success({ stages, chatRoom });
     }
@@ -449,7 +451,7 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
     if (path === '/tokens/chat' && method === 'POST') {
       const profile = await db.get<Entity & { commentSuspended?: boolean; displayName?: string }>(KEYS.user(principal.userId), 'PROFILE');
       const capabilities: ChatTokenCapability[] = principal.role === 'admin' ? ['SEND_MESSAGE', 'DELETE_MESSAGE', 'DISCONNECT_USER'] : profile?.commentSuspended ? [] : ['SEND_MESSAGE'];
-      const token = await clients.chat.send(new CreateChatTokenCommand({ roomIdentifier: env.CHAT_ROOM_ARN, userId: principal.userId, capabilities, sessionDurationInMinutes: 60, attributes: { displayName: profile?.displayName ?? '' } }));
+      const token = await clients.chat.send(new CreateChatTokenCommand({ roomIdentifier: await chatRoomArn(), userId: principal.userId, capabilities, sessionDurationInMinutes: 60, attributes: { displayName: profile?.displayName ?? '' } }));
       return success({ token: token.token, capabilities });
     }
     if (path === '/comments/recent' && method === 'GET') {
@@ -464,7 +466,7 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
       const { messageId } = valid(MessageIdParamsSchema, { messageId: parts[1] });
       const ref = await db.get<Entity & { commentSk?: string }>(KEYS.commentRef(messageId), 'REF');
       if (!ref?.commentSk) throw notFound();
-      await clients.chat.send(new DeleteMessageCommand({ roomIdentifier: env.CHAT_ROOM_ARN, id: messageId, reason: '管理者による削除' }));
+      await clients.chat.send(new DeleteMessageCommand({ roomIdentifier: await chatRoomArn(), id: messageId, reason: '管理者による削除' }));
       await orNotFound(db.update(KEYS.commentPk, ref.commentSk, 'SET deleted = :deleted', { ':deleted': true }, 'attribute_exists(PK)'));
       audit(principal, 'comment.delete', messageId);
       return success();
@@ -476,7 +478,7 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
       await db.update(KEYS.user(userId), 'PROFILE', 'SET commentSuspended = :suspended, updatedAt = :updatedAt', { ':suspended': suspended, ':updatedAt': iso(now()) });
       audit(principal, 'comment.suspension', userId);
       // 停止・解除とも切断する。本人のクライアントは再接続で /me とトークンの権限を取り直す（R4-02）
-      await clients.chat.send(new DisconnectUserCommand({ roomIdentifier: env.CHAT_ROOM_ARN, userId, reason: suspended ? 'コメント送信停止' : 'コメント送信停止の解除' }));
+      await clients.chat.send(new DisconnectUserCommand({ roomIdentifier: await chatRoomArn(), userId, reason: suspended ? 'コメント送信停止' : 'コメント送信停止の解除' }));
       return success();
     }
     if (path === '/comments/export' && method === 'GET') {

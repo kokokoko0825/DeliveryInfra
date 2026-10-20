@@ -21,9 +21,12 @@ export interface ResourceRefs {
   stageSlideArn: string;
   stageBroadcastArn: string;
   chatRoomArn: string;
+  /** api 用。Chat Room の ARN を参照すると循環するため名前を渡す(apps/api が ListRooms で解決する)。 */
+  chatRoomName: string;
   contentBucket: string;
   recordingBucket: string;
-  storageConfigurationArn: string;
+  /** api 用。StorageConfiguration の ARN を参照すると循環するため名前を渡す(ListStorageConfigurations で解決する)。 */
+  storageConfigurationName: string;
   encoderConfigurationArn: string;
   cloudFrontKeyPairId: string;
   cloudFrontPrivateKeyParameter: string;
@@ -33,6 +36,8 @@ export interface ResourceRefs {
  * ハンドラごとに必要な変数だけを渡す。
  * chat-review は Chat Room の、cognito は User Pool のトリガーなので、
  * それぞれの ARN/ID を渡すと CloudFormation の循環参照になる(値はイベントから取れる)。
+ * api は CloudFront のオリジンなので、IVS がバケットポリシーに書き込む Chat Room(ログ設定経由)と
+ * StorageConfiguration を参照すると バケットポリシー → Distribution → api と循環する。名前だけを渡す。
  * AWS_REGION は Lambda の予約変数なので設定しない。
  */
 export function buildLambdaEnvironment(handler: HandlerName, refs: ResourceRefs): Record<string, string> {
@@ -46,10 +51,10 @@ export function buildLambdaEnvironment(handler: HandlerName, refs: ResourceRefs)
         STAGE_PRODUCTION_ARN: refs.stageProductionArn,
         STAGE_SLIDE_ARN: refs.stageSlideArn,
         STAGE_BROADCAST_ARN: refs.stageBroadcastArn,
-        CHAT_ROOM_ARN: refs.chatRoomArn,
+        CHAT_ROOM_NAME: refs.chatRoomName,
         CONTENT_BUCKET: refs.contentBucket,
         RECORDING_BUCKET: refs.recordingBucket,
-        RECORDING_STORAGE_CONFIGURATION_ARN: refs.storageConfigurationArn,
+        RECORDING_STORAGE_CONFIGURATION_NAME: refs.storageConfigurationName,
         ENCODER_CONFIGURATION_ARN: refs.encoderConfigurationArn,
         CLOUDFRONT_KEY_PAIR_ID: refs.cloudFrontKeyPairId,
         CLOUDFRONT_PRIVATE_KEY_PARAMETER: refs.cloudFrontPrivateKeyParameter,
