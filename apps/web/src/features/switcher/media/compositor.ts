@@ -1,7 +1,7 @@
 /** engine/compose の描画命令を Canvas 2D に描く。 */
 import type { DrawOp } from '../engine/compose';
 import { fitRect, type Size } from '../engine/layout';
-import type { SourceId } from '../engine/scene';
+import { isCamera, type SourceId } from '../engine/scene';
 
 export type Drawable = CanvasImageSource & ({ videoWidth: number; videoHeight: number } | { width: number; height: number });
 export type ResolveSource = (source: SourceId) => Drawable | null;
@@ -33,7 +33,9 @@ export function drawFrame(context: CanvasRenderingContext2D, ops: DrawOp[], reso
       if (!image) continue;
       const size = sizeOf(image);
       if (size.width === 0 || size.height === 0) continue;
-      const r = fitRect(size, layer.rect, layer.fit);
+      // 配信キャンバスは固定。縦向きカメラは高さに合わせて左右を黒帯にし、横向きは幅に合わせる。
+      const fit = isCamera(layer.source) && size.height > size.width ? 'contain' : layer.fit;
+      const r = fitRect(size, layer.rect, fit);
       context.drawImage(image, r.sx, r.sy, r.sw, r.sh, r.dx, r.dy, r.dw, r.dh);
     }
     context.restore();
