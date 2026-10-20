@@ -484,6 +484,14 @@ export type VenueSession = { close: () => void; connected: Promise<void>; getRtt
 export type VenueMicOptions = TransportOptions;
 export type VenueSpeakerOptions = TransportOptions;
 
+export type PreparedVenueSpeakerAudio = { context: AudioContext; ready: Promise<void> };
+
+/** Call synchronously from the speaker's user-gesture handler to unlock iOS Web Audio. */
+export function prepareVenueSpeakerAudio(): PreparedVenueSpeakerAudio {
+  const context = new AudioContext({ latencyHint: 'interactive', sampleRate: 48000 });
+  return { context, ready: context.resume() };
+}
+
 export async function startVenueMic(stream: MediaStream, options: VenueMicOptions = {}): Promise<VenueSession> {
   const roomId = options.roomId ?? ROOM_ID;
   const transport = options.transport ?? 'pcm';
@@ -523,15 +531,18 @@ export async function startVenueMic(stream: MediaStream, options: VenueMicOption
   return session;
 }
 
-export async function startVenueSpeaker(onRtt: (rtt: number) => void, options: VenueSpeakerOptions = {}): Promise<VenueSession> {
+export async function startVenueSpeaker(onRtt: (rtt: number) => void, options: VenueSpeakerOptions = {}, preparedAudio?: PreparedVenueSpeakerAudio): Promise<VenueSession> {
   const roomId = options.roomId ?? ROOM_ID;
   const transport = options.transport ?? 'pcm';
-  const registration = await registerParticipant('speaker', options);
-  let context: AudioContext | undefined;
+  const audio = preparedAudio ?? prepareVenueSpeakerAudio();
+  const context = audio.context;
   let processor: AudioWorkletNode | undefined;
+  let registration: Registration | undefined;
   const workletStreams = new Map<string, VenueWorkletStreamMetrics>();
   try {
-    context = new AudioContext({ latencyHint: 'interactive', sampleRate: 48000 });
+    await audio.ready;
+    if (context.state !== 'running') await context.resume();
+    registration = await registerParticipant('speaker', options);
     if (transport === 'pcm') {
       await context.audioWorklet.addModule(venuePcmWorkletUrl);
       processor = new AudioWorkletNode(context, 'venue-pcm', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1] });
@@ -556,10 +567,11 @@ export async function startVenueSpeaker(onRtt: (rtt: number) => void, options: V
     }
   } catch (error) {
     processor?.disconnect();
-    if (context) void context.close();
-    void apiFetch(`${roomPath(roomId)}/participants/${registration.participantId}`, { method: 'DELETE' }).catch(() => undefined);
+    void context.close();
+    if (registration) void apiFetch(`${roomPath(roomId)}/participants/${registration.participantId}`, { method: 'DELETE' }).catch(() => undefined);
     throw error;
   }
+  if (!registration) throw new Error('スピーカー登録に失敗しました');
   const session = createSession('speaker', registration, roomId, onRtt, () => ({
     close: () => { processor?.disconnect(); if (context) void context.close(); },
     onPcm: (micId, sequence, timestamp, data) => processor?.port.postMessage({ type: 'enqueue', micId, sequence, timestamp, payload: data }, [data]),

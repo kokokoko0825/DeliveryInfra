@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { MonitorPlay, Square } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { SenderShell } from '@/features/sender/components';
-import { startVenueSpeaker, type VenueSession, type VenueSessionMetrics, type VenueTransport } from './venueAudio';
+import { prepareVenueSpeakerAudio, startVenueSpeaker, type PreparedVenueSpeakerAudio, type VenueSession, type VenueSessionMetrics, type VenueTransport } from './venueAudio';
 import { metricsValues, VenueRunControls } from './VenueMicPage';
 import { holdWakeLock } from '@/lib/ivs/wakeLock';
 import {
@@ -96,12 +96,14 @@ export default function VenueSpeakerPage() {
     void id;
   };
   const starting = useRef(false);
-  const start = async () => {
-    if (session.current || runRef.current || starting.current) return;
+  const start = async (audio: PreparedVenueSpeakerAudio) => {
+    if (session.current || runRef.current || starting.current) { void audio.context.close(); return; }
     starting.current = true;
     setError(null);
     const id = newRunId();
     try {
+      // `audio.ready` was started synchronously by the button's user gesture.
+      await audio.ready;
       // The fixed runlog schema has no transport field; reserve a config marker in peers.
       await createVenueRun({ id, startedAtUtc: nowUtc(), userAgent: navigator.userAgent, peers: [`config.transport=${transport}`] });
       runRef.current = id;
@@ -111,7 +113,7 @@ export default function VenueSpeakerPage() {
       startMono.current = performance.now();
       addEvent('start', `transport=${transport}`);
       setStatus('マイク端末を待っています');
-      const current = await startVenueSpeaker(() => undefined, { transport, ...(slotChoice === 'auto' ? {} : { slot: slotChoice }) });
+      const current = await startVenueSpeaker(() => undefined, { transport, ...(slotChoice === 'auto' ? {} : { slot: slotChoice }) }, audio);
       if (runRef.current !== id) { current.close(); return; }
       session.current = current;
       updateMetrics(current, id);
@@ -128,6 +130,7 @@ export default function VenueSpeakerPage() {
         setStatus('エラー');
       });
     } catch (reason) {
+      void audio.context.close();
       const message = errorMessage(reason);
       if (runRef.current) {
         write(record('error', `error-${Date.now()}`, performance.now() - startMono.current, { code: 'start', message }));
@@ -164,7 +167,7 @@ export default function VenueSpeakerPage() {
       <ul>{metrics.peers.map((peer) => <li key={peer.peerId}>{peer.side === 'mic' ? 'MIC' : 'SPK'}{peer.slot}: {peer.connected ? '接続済み' : peer.state}</li>)}</ul>
       {metrics.workletStreams.map((stream) => <p key={stream.micId}>{stream.micId}: {stream.queuedMs} ms queued / underflow {stream.underflows} / overflow {stream.overflows}</p>)}
     </section>}
-    {!active ? <Button className="h-11 w-full" onClick={() => void start()}><MonitorPlay aria-hidden />受信開始</Button> : <Button variant="outline" className="h-11 w-full" onClick={stop}><Square aria-hidden />停止</Button>}
+    {!active ? <Button className="h-11 w-full" onClick={() => void start(prepareVenueSpeakerAudio())}><MonitorPlay aria-hidden />受信開始</Button> : <Button variant="outline" className="h-11 w-full" onClick={stop}><Square aria-hidden />停止</Button>}
     <p className="text-sm text-muted-foreground">開始ボタンを押すと音声再生を有効化します。iPhone/iPad で無音の場合は自動再生設定と端末の消音スイッチを確認し、停止して再度開始してください。診断 RTT は片道音声遅延ではありません。</p>
     <VenueRunControls runId={runIdValue} slot={ownSlot} metrics={metrics} onFailure={setError} side="speaker" transport={runTransport} />
   </SenderShell>;

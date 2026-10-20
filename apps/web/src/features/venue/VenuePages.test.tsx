@@ -5,11 +5,11 @@ import VenueSpeakerPage from './VenueSpeakerPage';
 import type { VenueSession, VenueSessionMetrics } from './venueAudio';
 
 const mocks = vi.hoisted(() => ({
-  startMic: vi.fn(), startSpeaker: vi.fn(), createRun: vi.fn(), appendRecord: vi.fn(), endRun: vi.fn(),
+  startMic: vi.fn(), startSpeaker: vi.fn(), prepareSpeakerAudio: vi.fn(), createRun: vi.fn(), appendRecord: vi.fn(), endRun: vi.fn(),
   listRuns: vi.fn(), exportRun: vi.fn(), saveBlob: vi.fn(), close: vi.fn(), createRecorder: vi.fn(),
 }));
 
-vi.mock('./venueAudio', () => ({ startVenueMic: mocks.startMic, startVenueSpeaker: mocks.startSpeaker }));
+vi.mock('./venueAudio', () => ({ startVenueMic: mocks.startMic, startVenueSpeaker: mocks.startSpeaker, prepareVenueSpeakerAudio: mocks.prepareSpeakerAudio }));
 vi.mock('./venueRunLog', () => ({
   createVenueRun: mocks.createRun, appendVenueRunRecord: mocks.appendRecord,
   endVenueRun: mocks.endRun, listVenueRuns: mocks.listRuns, exportVenueRun: mocks.exportRun,
@@ -46,6 +46,7 @@ describe('venue PoC pages', () => {
     mocks.endRun.mockResolvedValue(undefined);
     mocks.listRuns.mockResolvedValue([]);
     mocks.exportRun.mockResolvedValue({ csv: '\uFEFFcsv', manifestJson: '{"summary":{}}' });
+    mocks.prepareSpeakerAudio.mockReturnValue({ context: { close: mocks.close } as unknown as AudioContext, ready: Promise.resolve() });
     mocks.createRecorder.mockReturnValue({ start: vi.fn(), stop: vi.fn().mockResolvedValue({ blob: new Blob(['evidence']), mimeType: 'audio/webm;codecs=opus', extension: 'webm', byteCount: 8 }), cleanup: vi.fn() });
   });
   afterEach(() => { vi.useRealTimers(); });
@@ -97,7 +98,7 @@ describe('venue PoC pages', () => {
     const { rerender } = render(<VenueSpeakerPage />);
     fireEvent.change(screen.getByRole('combobox', { name: 'スピーカースロット' }), { target: { value: '3' } });
     fireEvent.click(screen.getByRole('button', { name: '受信開始' }));
-    await waitFor(() => expect(mocks.startSpeaker).toHaveBeenCalledWith(expect.any(Function), { transport: 'pcm', slot: 3 }));
+    await waitFor(() => expect(mocks.startSpeaker).toHaveBeenCalledWith(expect.any(Function), { transport: 'pcm', slot: 3 }, expect.any(Object)));
     expect(await screen.findByText('自分のスロット: SPK3')).toBeInTheDocument();
     expect(screen.getByText(/診断 RTT: 21.5 ms/)).toBeInTheDocument();
     expect(screen.getAllByText(/片道音声遅延ではありません/)).toHaveLength(2);

@@ -62,9 +62,11 @@ class FakePeer {
 }
 
 class FakeAudioContext {
+  state: AudioContextState = 'suspended';
   destination = {} as AudioNode;
   audioWorklet = { addModule: vi.fn(async (url: string) => { void url; }) };
   close = vi.fn(async () => undefined);
+  resume = vi.fn(async () => { this.state = 'running'; });
   source = { connect: vi.fn(), disconnect: vi.fn() };
   trackSources: Array<{ connect: ReturnType<typeof vi.fn>; disconnect: ReturnType<typeof vi.fn> }> = [];
   gain = { gain: { value: 1 }, connect: vi.fn(), disconnect: vi.fn() };
@@ -173,6 +175,22 @@ async function waitForLinks(count: number) {
 }
 
 describe('venue room audio transport', () => {
+  it('resumes the speaker AudioContext before waiting for signaling API calls', async () => {
+    const pending = startVenueSpeaker(vi.fn());
+    void pending.catch(() => undefined);
+    void pending.then((session) => session.connected.catch(() => undefined));
+    const resumedBeforeAwait = contexts[0]?.resume.mock.calls.length === 1;
+    const apiWasStillIdle = api.fetch.mock.calls.length === 0;
+    const session = await pending;
+    try {
+      expect(resumedBeforeAwait).toBe(true);
+      expect(apiWasStillIdle).toBe(true);
+      expect(api.fetch).toHaveBeenCalled();
+    } finally {
+      session.close();
+    }
+  });
+
   it.each([
     { name: 'one-to-many', micCount: 1, speakerCount: 2, pairs: 2 },
     { name: 'many-to-many', micCount: 2, speakerCount: 2, pairs: 4 },
