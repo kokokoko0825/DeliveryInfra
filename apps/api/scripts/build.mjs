@@ -9,5 +9,7 @@ for (const [outputName, sourceName] of handlers) {
   await build({
     entryPoints: [`src/${sourceName}.ts`], outfile, bundle: true,
     platform: 'node', target: 'node22', format: 'esm', sourcemap: true,
+    // 依存(AWS SDK 等)は CommonJS で node:https などを require する。ESM 出力でも require を使えるようにする。
+    banner: { js: "import { createRequire as __createRequire } from 'node:module'; const require = __createRequire(import.meta.url);" },
   });
 }

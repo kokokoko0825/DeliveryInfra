@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { CLOUDFRONT_HOST, TABLE_INDEXES } from './support/environment';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -89,6 +90,16 @@ describe('Infra(CDK synth) ↔ API(ビルド出力・環境変数)', () => {
     expect(resources[id]!.Properties).toMatchObject({ Handler: 'index.handler', Runtime: 'nodejs22.x', Architectures: ['arm64'] });
     const module = await import(pathToFileURL(path.join(API_DIST, dist, 'index.mjs')).href) as { handler?: unknown };
     expect(typeof module.handler).toBe('function');
+  });
+
+  it.each(BUILD_ENTRIES)('$dist: Vitest を通さない素の Node で読み込める(Lambda の初期化と同じ条件)', ({ dist }) => {
+    // Vitest は require を補うため、ESM バンドルの "Dynamic require of node:https" をここで検出する。
+    const url = pathToFileURL(path.join(API_DIST, dist, 'index.mjs')).href;
+    const output = execFileSync(process.execPath, ['--input-type=module', '-e', `const m = await import(${JSON.stringify(url)}); console.log(typeof m.handler);`], {
+      encoding: 'utf8',
+      env: { PATH: process.env.PATH ?? '' },
+    });
+    expect(output.trim()).toBe('function');
   });
 
   it.each(BUILD_ENTRIES)('$dist: 環境変数のキーがハンドラの env スキーマを満たし、余分なキーがない', ({ dist }) => {
