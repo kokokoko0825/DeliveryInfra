@@ -67,7 +67,7 @@ export default function CameraSendPage() {
   const error = sender.state.error ?? mediaError;
 
   return (
-    <SenderShell title="カメラ送信" description="720p / 30fps で映像だけを送ります。音声はマイク端末から送ってください。" status={<ConnectionStatus status={sender.state.status} />}>
+    <SenderShell title="カメラ送信" description="720p / 30fps で映像だけを送ります。横向きで撮影するときは端末の画面回転ロックを解除してください。ロック中は映像が横向きで送信されない場合があります。音声はマイク端末から送ってください。" status={<ConnectionStatus status={sender.state.status} />}>
       <VideoPreview stream={stream} label="カメラのプレビュー" />
       <div className="grid gap-4 sm:grid-cols-2">
         <DeviceNameSelect id="camera-device-name" options={options} value={deviceName} onChange={setDeviceName} disabled={!canStart(sender.state.status)} />

@@ -1,4 +1,4 @@
-import { useEffect, useRef, type MouseEvent } from 'react';
+import { useEffect, useRef, useState, type MouseEvent, type SyntheticEvent } from 'react';
 import { Image as ImageIcon, MonitorUp, Video, VideoOff } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
@@ -12,10 +12,18 @@ export const keepFocus = (event: MouseEvent) => event.preventDefault();
 
 function TileVideo({ stream }: { stream: MediaStream | null }) {
   const ref = useRef<HTMLVideoElement>(null);
+  const [portrait, setPortrait] = useState(false);
   useEffect(() => {
-    if (ref.current) ref.current.srcObject = stream;
+    if (ref.current) {
+      setPortrait(false);
+      ref.current.srcObject = stream;
+    }
   }, [stream]);
-  return <video ref={ref} className="size-full object-cover" autoPlay muted playsInline />;
+  const updateOrientation = (event: SyntheticEvent<HTMLVideoElement>) => {
+    const video = event.currentTarget;
+    setPortrait(video.videoHeight > video.videoWidth);
+  };
+  return <video ref={ref} className={cn('size-full bg-black', portrait ? 'object-contain' : 'object-cover')} onLoadedMetadata={updateOrientation} onResize={updateOrientation} autoPlay muted playsInline />;
 }
 
 export function buildTiles(slots: (string | null)[], health: Map<SourceId, SourceHealth>, streamOf: (source: SourceId) => MediaStream | null): Tile[] {
