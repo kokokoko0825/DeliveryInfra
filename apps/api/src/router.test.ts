@@ -390,6 +390,93 @@ describe('stage tokens and device slots', () => {
   });
 });
 
+describe('venue speaker signaling', () => {
+  it.each(['viewer', 'camera', 'presenter'] as const)(
+    'rejects %s from both signaling sides before reading or writing signals',
+    async (role) => {
+      for (const side of ['mic', 'speaker'] as const) {
+        const response = await request(role, 'PUT', `/venue-speaker/${side}`, {
+          type: side === 'mic' ? 'offer' : 'answer',
+          sdp: 'v=0',
+        });
+        expect(response.statusCode).toBe(403);
+      }
+      expect(ddb.commandCalls(GetCommand)).toHaveLength(0);
+      expect(ddb.commandCalls(PutCommand)).toHaveLength(0);
+    },
+  );
+
+  it.each([
+    ['mic answer', 'mic', { type: 'answer', sdp: 'v=0' }],
+    ['speaker offer', 'speaker', { type: 'offer', sdp: 'v=0' }],
+    ['empty SDP', 'mic', { type: 'offer', sdp: '' }],
+    ['invalid signal type', 'speaker', { type: 'candidate', sdp: 'v=0' }],
+  ] as const)('rejects %s without storing it', async (_name, side, body) => {
+    const response = await request('audio', 'PUT', `/venue-speaker/${side}`, body);
+    expect(response.statusCode).toBe(400);
+    if (_name === 'mic answer' || _name === 'speaker offer') {
+      expect(data(response).error?.message).toBe('SDP の役割が不正です');
+    }
+    expect(ddb.commandCalls(PutCommand)).toHaveLength(0);
+  });
+
+  it('rejects unsupported signaling methods without reading or writing signals', async () => {
+    const response = await request('audio', 'POST', '/venue-speaker/mic', { type: 'offer', sdp: 'v=0' });
+    expect(response.statusCode).toBe(404);
+    expect(ddb.commandCalls(GetCommand)).toHaveLength(0);
+    expect(ddb.commandCalls(PutCommand)).toHaveLength(0);
+  });
+
+  it('stores valid offers and answers with a 90 second TTL', async () => {
+    for (const [side, type] of [['mic', 'offer'], ['speaker', 'answer']] as const) {
+      const response = await request('audio', 'PUT', `/venue-speaker/${side}`, { type, sdp: 'v=0' });
+      expect(response.statusCode).toBe(200);
+      expect(data(response)).toEqual({ expiresAt: new Date((NOW_S + 90) * 1000).toISOString() });
+      expect(ddb.commandCalls(PutCommand).at(-1)?.args[0].input.Item).toMatchObject({
+        PK: 'VENUE_SPEAKER#CURRENT', SK: side, type, sdp: 'v=0', userId: 'user-1', ttl: NOW_S + 90,
+      });
+    }
+  });
+
+  it('returns the opposite side signal and performs a consistent read', async () => {
+    ddb.on(GetCommand).resolves({ Item: { type: 'offer', sdp: 'remote-sdp', ttl: NOW_S + 10 } });
+    await expect(request('audio', 'GET', '/venue-speaker/mic')).resolves.toMatchObject({
+      statusCode: 200,
+      body: JSON.stringify({ type: 'offer', sdp: 'remote-sdp' }),
+    });
+    await expect(request('audio', 'GET', '/venue-speaker/speaker')).resolves.toMatchObject({
+      statusCode: 200,
+      body: JSON.stringify({ type: 'offer', sdp: 'remote-sdp' }),
+    });
+    expect(ddb.commandCalls(GetCommand).map((call) => call.args[0].input)).toEqual([
+      { TableName: 'table', Key: { PK: 'VENUE_SPEAKER#CURRENT', SK: 'speaker' }, ConsistentRead: true },
+      { TableName: 'table', Key: { PK: 'VENUE_SPEAKER#CURRENT', SK: 'mic' }, ConsistentRead: true },
+    ]);
+  });
+
+  it('hides an expired peer signal', async () => {
+    ddb.on(GetCommand).resolves({ Item: { PK: 'VENUE_SPEAKER#CURRENT', SK: 'speaker', type: 'answer', sdp: 'v=0', ttl: NOW_S } });
+    const response = await request('audio', 'GET', '/venue-speaker/mic');
+    expect(response.statusCode).toBe(200);
+    expect(data(response)).toBeNull();
+  });
+
+  it('allows only the signal owner to delete it (admins can clean up any signal)', async () => {
+    await expect(request('admin', 'DELETE', '/venue-speaker/mic')).resolves.toMatchObject({ statusCode: 200 });
+    expect(ddb.commandCalls(DeleteCommand)).toHaveLength(0);
+
+    ddb.on(GetCommand).resolves({ Item: { PK: 'VENUE_SPEAKER#CURRENT', SK: 'mic', userId: 'someone-else' } });
+    await expect(request('audio', 'DELETE', '/venue-speaker/mic')).resolves.toMatchObject({ statusCode: 404 });
+    expect(ddb.commandCalls(DeleteCommand)).toHaveLength(0);
+
+    await expect(request('audio', 'DELETE', '/venue-speaker/mic', undefined, 'someone-else')).resolves.toMatchObject({ statusCode: 200 });
+    expect(ddb.commandCalls(DeleteCommand).at(-1)?.args[0].input).toMatchObject({ Key: { PK: 'VENUE_SPEAKER#CURRENT', SK: 'mic' } });
+
+    await expect(request('admin', 'DELETE', '/venue-speaker/mic')).resolves.toMatchObject({ statusCode: 200 });
+    expect(ddb.commandCalls(DeleteCommand)).toHaveLength(2);
+  });
+});
+
 describe('API router endpoint behavior', () => {
   it('returns email and login method from Cognito because access tokens lack them (R1-01)', async () => {
     ddb.on(GetCommand).resolves({ Item: { displayName: 'Kos', commentSuspended: true } });

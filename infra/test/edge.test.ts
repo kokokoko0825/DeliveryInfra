@@ -30,6 +30,8 @@ describe('buildCsp', () => {
     expect(directives['object-src']).toEqual(["'none'"]);
     expect(directives['base-uri']).toEqual(["'self'"]);
     expect(directives['script-src']).toEqual(["'self'", "'wasm-unsafe-eval'"]);
+    expect(directives['script-src']).not.toContain('blob:');
+    expect(directives['script-src']).not.toContain('data:');
     expect(directives['style-src']).toEqual(["'self'", "'unsafe-inline'"]);
     expect(directives['img-src']).toEqual(["'self'", 'data:', 'blob:']);
     expect(directives['font-src']).toEqual(["'self'"]);

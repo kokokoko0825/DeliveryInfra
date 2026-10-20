@@ -1,19 +1,9 @@
 import { apiFetch } from '@/lib/api';
+import venuePcmWorkletUrl from './venue-pcm.worklet.js?url&no-inline';
 
 type Signal = { type: 'offer' | 'answer'; sdp: string };
 type Side = 'mic' | 'speaker';
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-const workletSource = `class VenuePcm extends AudioWorkletProcessor {
-  constructor(){ super(); this.pending=[]; this.queue=[]; this.port.onmessage=e=>{ if(e.data instanceof ArrayBuffer) this.queue.push(new Int16Array(e.data)); }; }
-  process(inputs, outputs){ const out=outputs[0]?.[0]; if(out) out.fill(0);
-    const input=inputs[0]?.[0]; if(input){ for(let i=0;i<input.length;i++) this.pending.push(Math.max(-1,Math.min(1,input[i]))); const n=Math.round(sampleRate/100);
-      while(this.pending.length>=n){ const part=this.pending.splice(0,n); const pcm=new Int16Array(n); for(let j=0;j<n;j++) pcm[j]=part[j]<0?part[j]*32768:part[j]*32767; this.port.postMessage(pcm.buffer,[pcm.buffer]); }
-    }
-    if(out){ let written=0; while(this.queue.length&&written<out.length){ const chunk=this.queue[0]; const take=Math.min(chunk.length,out.length-written); for(let i=0;i<take;i++) out[written+i]=chunk[i]/32768; written+=take; if(take===chunk.length)this.queue.shift(); else this.queue[0]=chunk.subarray(take); } }
-    return true;
-  }
-} registerProcessor('venue-pcm',VenuePcm);`;
-
 export type VenueSession = {
   close: () => void;
   connected: Promise<void>;
@@ -50,12 +40,6 @@ function waitIce(peer: RTCPeerConnection) {
     setTimeout(resolve, 8000);
   });
 }
-function makeWorklet() {
-  return URL.createObjectURL(
-    new Blob([workletSource], { type: 'text/javascript' }),
-  );
-}
-
 export async function startVenueMic(
   stream: MediaStream,
 ): Promise<VenueSession> {
@@ -71,7 +55,7 @@ export async function startVenueMic(
     latencyHint: 'interactive',
     sampleRate: 48000,
   });
-  await context.audioWorklet.addModule(makeWorklet());
+  await context.audioWorklet.addModule(venuePcmWorkletUrl);
   const processor = new AudioWorkletNode(context, 'venue-pcm', {
     numberOfInputs: 1,
     numberOfOutputs: 1,
@@ -157,7 +141,7 @@ export async function startVenueSpeaker(
     latencyHint: 'interactive',
     sampleRate: 48000,
   });
-  await context.audioWorklet.addModule(makeWorklet());
+  await context.audioWorklet.addModule(venuePcmWorkletUrl);
   const processor = new AudioWorkletNode(context, 'venue-pcm', {
     numberOfInputs: 0,
     numberOfOutputs: 1,
