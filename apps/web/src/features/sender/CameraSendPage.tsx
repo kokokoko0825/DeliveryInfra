@@ -121,9 +121,9 @@ export default function CameraSendPage() {
         <div className="camera-live-controls absolute inset-x-0 bottom-0 flex flex-col items-center gap-5 px-6 pb-[max(2rem,env(safe-area-inset-bottom))]">
           {zoom && (
             <div className="camera-live-zoom flex items-center gap-4 rounded-full bg-black/60 px-3 py-2 text-white">
-              <Button variant="secondary" size="icon" className="size-11 rounded-full" aria-label="ズームアウト" disabled={zoom.value <= zoom.min} onClick={() => void changeZoom(-1)}><Minus aria-hidden /></Button>
-              <span className="min-w-12 text-center text-sm tabular-nums">{zoom.value.toFixed(1)}×</span>
-              <Button variant="secondary" size="icon" className="size-11 rounded-full" aria-label="ズームイン" disabled={zoom.value >= zoom.max} onClick={() => void changeZoom(1)}><Plus aria-hidden /></Button>
+              <Button variant="secondary" size="icon" className="camera-zoom-out size-11 rounded-full" aria-label="ズームアウト" disabled={zoom.value <= zoom.min} onClick={() => void changeZoom(-1)}><Minus aria-hidden /></Button>
+              <span className="camera-zoom-level min-w-12 text-center text-sm tabular-nums">{zoom.value.toFixed(1)}×</span>
+              <Button variant="secondary" size="icon" className="camera-zoom-in size-11 rounded-full" aria-label="ズームイン" disabled={zoom.value >= zoom.max} onClick={() => void changeZoom(1)}><Plus aria-hidden /></Button>
             </div>
           )}
           <Button variant="destructive" size="icon" className="size-16 rounded-full border-4 border-white/80" aria-label="送信停止" onClick={stop}><Square aria-hidden /></Button>

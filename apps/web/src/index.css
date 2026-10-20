@@ -5,7 +5,7 @@
 /* Keep camera controls on a side edge in landscape, like a native camera UI. */
 @media (orientation: landscape) {
   .camera-live-controls {
-    inset: 0 max(1rem, env(safe-area-inset-right)) 0 auto;
+    inset: 0 auto 0 max(1rem, env(safe-area-inset-left));
     justify-content: center;
     padding: max(1rem, env(safe-area-inset-top)) 0 max(1rem, env(safe-area-inset-bottom));
   }
@@ -14,6 +14,10 @@
     flex-direction: column;
     gap: 0.5rem;
   }
+
+  .camera-zoom-in { order: -1; }
+  .camera-zoom-level { order: 0; }
+  .camera-zoom-out { order: 1; }
 }
 
 :root {
