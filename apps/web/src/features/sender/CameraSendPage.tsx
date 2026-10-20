@@ -82,9 +82,16 @@ export default function CameraSendPage() {
 
   const nameError = validateDeviceName('camera', deviceName);
   const start = async (takeover = false) => {
+    if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
+      void document.documentElement.requestFullscreen({ navigationUI: 'hide' }).catch(() => undefined);
+    }
     const media = current.current ?? await openCamera(facing);
     if (!media || nameError) return;
     await sender.start(toPublishTracks(media.getVideoTracks(), CAMERA_PUBLISH, undefined), deviceName, false, takeover);
+  };
+  const stop = () => {
+    sender.stop();
+    if (document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
   };
   const error = sender.state.error ?? mediaError;
   const cameraView = active || sender.state.status === 'starting';
@@ -102,6 +109,10 @@ export default function CameraSendPage() {
     }
   };
 
+  useEffect(() => {
+    if (sender.state.status === 'error' && document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
+  }, [sender.state.status]);
+
   if (cameraView) {
     return (
       <main className="fixed inset-0 z-50 bg-black">
@@ -115,7 +126,7 @@ export default function CameraSendPage() {
               <Button variant="secondary" size="icon" className="size-11 rounded-full" aria-label="ズームイン" disabled={zoom.value >= zoom.max} onClick={() => void changeZoom(1)}><Plus aria-hidden /></Button>
             </div>
           )}
-          <Button variant="destructive" size="icon" className="size-16 rounded-full border-4 border-white/80" aria-label="送信停止" onClick={sender.stop}><Square aria-hidden /></Button>
+          <Button variant="destructive" size="icon" className="size-16 rounded-full border-4 border-white/80" aria-label="送信停止" onClick={stop}><Square aria-hidden /></Button>
         </div>
       </main>
     );
