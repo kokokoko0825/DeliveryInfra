@@ -27,7 +27,7 @@ function RoleSelect({ id, value, onChange, disabled, label }: { id?: string; val
   return (
     // 空文字で未選択（プレースホルダー表示）にする。ロール要修復のユーザーで使う（R2-04）
     <Select value={value ?? ''} onValueChange={(next) => onChange(next as Role)} disabled={disabled}>
-      <SelectTrigger id={id} className="min-h-11 w-36" aria-label={label}><SelectValue placeholder="ロールを選択" /></SelectTrigger>
+      <SelectTrigger id={id} className="h-11 w-36" aria-label={label}><SelectValue placeholder="ロールを選択" /></SelectTrigger>
       <SelectContent>
         {ROLES.map((role) => <SelectItem key={role} value={role} className="min-h-11">{ROLE_LABELS[role]}</SelectItem>)}
       </SelectContent>
