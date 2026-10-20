@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Camera, Square, SwitchCamera } from 'lucide-react';
+import { Camera, Minus, Plus, Square, SwitchCamera } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
@@ -12,14 +12,32 @@ import { useStageSender } from './useStageSender';
 
 const stopStream = (stream: MediaStream | null) => stream?.getTracks().forEach((track) => track.stop());
 
+type CameraZoom = { min: number; max: number; step: number; value: number };
+type ZoomCapabilities = { zoom?: { min: number; max: number; step?: number } };
+
+function cameraZoom(stream: MediaStream | null): CameraZoom | null {
+  const track = stream?.getVideoTracks()[0];
+  if (!track || typeof track.getCapabilities !== 'function') return null;
+  try {
+    const range = (track.getCapabilities() as MediaTrackCapabilities & ZoomCapabilities).zoom;
+    if (!range || !Number.isFinite(range.min) || !Number.isFinite(range.max) || range.max <= range.min) return null;
+    const value = track.getSettings().zoom ?? range.min;
+    return { min: range.min, max: range.max, step: range.step && range.step > 0 ? range.step : (range.max - range.min) / 20, value };
+  } catch {
+    return null;
+  }
+}
+
 export default function CameraSendPage() {
   const sender = useStageSender('camera');
   const { updateTracks } = sender;
   const { options, deviceName, setDeviceName } = useDeviceName('camera');
   const [facing, setFacing] = useState<Facing>('environment');
   const [stream, setStream] = useState<MediaStream | null>(null);
+  const [zoom, setZoom] = useState<CameraZoom | null>(null);
   const [mediaError, setMediaError] = useState<SenderErrorKind | null>(null);
   const current = useRef<MediaStream | null>(null);
+  const livePreview = useRef<HTMLVideoElement>(null);
   /** 最新の getUserMedia 要求の番号。古い要求の結果は使わずに止める（R3-09） */
   const request = useRef(0);
   const active = isActive(sender.state.status);
@@ -41,6 +59,7 @@ export default function CameraSendPage() {
       }
       current.current = next;
       setStream(next);
+      setZoom(cameraZoom(next));
       setMediaError(null);
       if (activeRef.current) updateTracks(toPublishTracks(next.getVideoTracks(), CAMERA_PUBLISH, undefined));
       return next;
@@ -57,6 +76,9 @@ export default function CameraSendPage() {
     request.current += 1;
     stopStream(current.current);
   }, []);
+  useEffect(() => {
+    if (livePreview.current) livePreview.current.srcObject = stream;
+  }, [stream, sender.state.status]);
 
   const nameError = validateDeviceName('camera', deviceName);
   const start = async (takeover = false) => {
@@ -65,6 +87,39 @@ export default function CameraSendPage() {
     await sender.start(toPublishTracks(media.getVideoTracks(), CAMERA_PUBLISH, undefined), deviceName, false, takeover);
   };
   const error = sender.state.error ?? mediaError;
+  const cameraView = active || sender.state.status === 'starting';
+
+  const changeZoom = async (direction: -1 | 1) => {
+    const track = current.current?.getVideoTracks()[0];
+    if (!track || !zoom) return;
+    const value = Math.max(zoom.min, Math.min(zoom.max, Math.round((zoom.value + direction * zoom.step) * 100) / 100));
+    if (value === zoom.value) return;
+    setZoom({ ...zoom, value });
+    try {
+      await track.applyConstraints({ advanced: [{ zoom: value }] } as unknown as MediaTrackConstraints);
+    } catch {
+      setZoom((currentZoom) => currentZoom ? { ...currentZoom, value: track.getSettings().zoom ?? zoom.value } : null);
+    }
+  };
+
+  if (cameraView) {
+    return (
+      <main className="fixed inset-0 z-50 bg-black">
+        <video ref={livePreview} aria-label="送信中のカメラ映像" className="absolute inset-0 size-full object-contain" autoPlay muted playsInline />
+        {sender.state.status === 'reconnecting' && <p role="status" className="absolute top-4 left-1/2 -translate-x-1/2 rounded-full bg-black/60 px-4 py-2 text-sm text-white">再接続中…</p>}
+        <div className="absolute inset-x-0 bottom-0 flex flex-col items-center gap-5 px-6 pb-[max(2rem,env(safe-area-inset-bottom))]">
+          {zoom && (
+            <div className="flex items-center gap-4 rounded-full bg-black/60 px-3 py-2 text-white">
+              <Button variant="secondary" size="icon" className="size-11 rounded-full" aria-label="ズームアウト" disabled={zoom.value <= zoom.min} onClick={() => void changeZoom(-1)}><Minus aria-hidden /></Button>
+              <span className="min-w-12 text-center text-sm tabular-nums">{zoom.value.toFixed(1)}×</span>
+              <Button variant="secondary" size="icon" className="size-11 rounded-full" aria-label="ズームイン" disabled={zoom.value >= zoom.max} onClick={() => void changeZoom(1)}><Plus aria-hidden /></Button>
+            </div>
+          )}
+          <Button variant="destructive" size="icon" className="size-16 rounded-full border-4 border-white/80" aria-label="送信停止" onClick={sender.stop}><Square aria-hidden /></Button>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <SenderShell title="カメラ送信" description="720p / 30fps で映像だけを送ります。横向きで撮影するときは端末の画面回転ロックを解除してください。ロック中は映像が横向きで送信されない場合があります。音声はマイク端末から送ってください。" status={<ConnectionStatus status={sender.state.status} />}>
