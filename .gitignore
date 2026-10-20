@@ -10,3 +10,4 @@ cdk.out/
 .DS_Store
 *.tsbuildinfo
 .pnpm-store/
+.playwright-mcp/
