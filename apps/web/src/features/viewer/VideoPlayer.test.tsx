@@ -5,7 +5,9 @@ import { canSetVolume, VideoPlayer } from './VideoPlayer';
 /** iOS Safari と同じく volume を読み取り専用（常に 1）にする。 */
 function makeVolumeReadOnly() {
   vi.spyOn(HTMLMediaElement.prototype, 'volume', 'get').mockReturnValue(1);
-  vi.spyOn(HTMLMediaElement.prototype, 'volume', 'set').mockImplementation(() => undefined);
+  vi.spyOn(HTMLMediaElement.prototype, 'volume', 'set').mockImplementation(
+    () => undefined,
+  );
 }
 
 beforeEach(() => {
@@ -35,10 +37,20 @@ describe('VideoPlayer', () => {
     expect(screen.queryByLabelText('音量')).not.toBeInTheDocument();
     expect(screen.queryByRole('slider')).not.toBeInTheDocument();
     const video = screen.getByLabelText<HTMLVideoElement>('配信映像');
-    fireEvent.click(screen.getByRole('button', { name: 'タップして音声オン' }));
+    const audioButton = screen.getByRole('button', {
+      name: 'タップして音声オン',
+    });
+    expect(
+      screen.getByRole('group', { name: '再生コントロール' }),
+    ).toContainElement(audioButton);
+    expect(audioButton).toHaveClass('min-h-11');
+    expect(audioButton.className).not.toMatch(/absolute|translate-y/u);
+    fireEvent.click(audioButton);
     expect(video.muted).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: 'ミュート' }));
     expect(video.muted).toBe(true);
-    expect(screen.getByRole('button', { name: 'ミュート解除' })).toHaveAttribute('aria-pressed', 'true');
+    expect(
+      screen.getByRole('button', { name: 'ミュート解除' }),
+    ).toHaveAttribute('aria-pressed', 'true');
   });
 });

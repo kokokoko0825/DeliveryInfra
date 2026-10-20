@@ -198,7 +198,7 @@ export class DeliveryStack extends Stack {
       return fn;
     };
     const apiFn = makeFunction('api', 512, Duration.seconds(29));
-    const chatReviewFn = makeFunction('chatReview', 256, Duration.seconds(3));
+    const chatReviewFn = makeFunction('chatReview', 1024, Duration.seconds(3));
     const recordingFn = makeFunction('recording', 256, Duration.seconds(30));
     const cognitoFn = makeFunction('cognito', 256, Duration.seconds(5));
     const archiveExpiryFn = makeFunction('archiveExpiry', 256, Duration.seconds(60));
@@ -406,10 +406,12 @@ export class DeliveryStack extends Stack {
       }),
     );
     apiFn.addToRolePolicy(
-      // アーカイブ削除(ListObjectsV2 + DeleteObjects)だけに使う。録画の読み取りは不要(R5-03)
+      // IVS StartComposition は録画先を使うとき呼び出し元にバケット所在確認を行うため GetBucketLocation が必要。
+      // 録画の読み取り権限は付けず、オブジェクト削除権限とバケット一覧権限に限定する(R5-03)。
       new iam.PolicyStatement({ actions: ['s3:DeleteObject'], resources: [recordingBucket.arnForObjects('*')] }),
     );
     apiFn.addToRolePolicy(new iam.PolicyStatement({ actions: ['s3:ListBucket'], resources: [recordingBucket.bucketArn] }));
+    apiFn.addToRolePolicy(new iam.PolicyStatement({ actions: ['s3:GetBucketLocation'], resources: [recordingBucket.bucketArn] }));
     apiFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['ssm:GetParameter'],

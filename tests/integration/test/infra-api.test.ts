@@ -213,6 +213,18 @@ describe('Infra(CDK synth) ↔ API(ビルド出力・環境変数)', () => {
     const matches = (action: string) => allowed.some((pattern) => new RegExp(`^${pattern.replaceAll('*', '.*')}$`, 'u').test(action));
     expect(required.filter((action) => !matches(action))).toEqual([]);
   });
+
+  it('api: StartComposition 用に録画バケットの所在確認だけを許可し、他バケットへ広げない', () => {
+    const api = resources[functionFor('api')!]!;
+    const roleId = getAttId(api.Properties.Role)!;
+    const policies = ofType('AWS::IAM::Policy')
+      .filter(([, policy]) => (policy.Properties.Roles as unknown[]).some((role) => refId(role) === roleId))
+      .flatMap(([, policy]) => (policy.Properties.PolicyDocument as { Statement: { Effect: string; Action: string | string[]; Resource: unknown }[] }).Statement);
+    const locationChecks = policies.filter((statement) => [statement.Action].flat().includes('s3:GetBucketLocation'));
+    const recordingId = ofType('AWS::S3::Bucket').find(([id]) => id.startsWith('RecordingBucket'))?.[0];
+    expect(recordingId).toBeDefined();
+    expect(locationChecks).toEqual([{ Effect: 'Allow', Action: ['s3:GetBucketLocation', 's3:ListBucket'], Resource: { 'Fn::GetAtt': [recordingId, 'Arn'] } }]);
+  });
 });
 
 /** SDK のパッケージ → IAM のサービス接頭辞。 */

@@ -324,13 +324,18 @@ describe('stg(既定)', () => {
       expect(policyOf('ApiFunction')).toContainEqual({ Effect: 'Allow', Action: 'ivs:StopComposition', Resource: 'arn:aws:ivs:ap-northeast-1:123456789012:composition/*' });
       expect(JSON.stringify(policyOf('ApiFunction'))).not.toContain('comment-exports');
     });
-    it('api: 録画バケットは一覧と削除だけで、録画を読めない（R5-03）', () => {
+    it('api: 録画バケットは一覧・削除・所在確認だけで、録画を読めない（R5-03）', () => {
       const recording = { 'Fn::GetAtt': [expect.stringMatching(/^RecordingBucket/), 'Arn'] };
       const onRecording = policyOf('ApiFunction').filter((s) => JSON.stringify(s.Resource).includes('RecordingBucket'));
       expect(onRecording).toEqual([
         { Effect: 'Allow', Action: 's3:DeleteObject', Resource: { 'Fn::Join': ['', [recording, '/*']] } },
-        { Effect: 'Allow', Action: 's3:ListBucket', Resource: recording },
+        { Effect: 'Allow', Action: ['s3:GetBucketLocation', 's3:ListBucket'], Resource: recording },
       ]);
+    });
+    it('chat-review は審査処理に必要な 1024 MB を割り当てる', () => {
+      const chatReview = Object.entries(t.main.findResources('AWS::Lambda::Function')).filter(([id]) => id.startsWith('ChatReviewFunction'));
+      expect(chatReview).toHaveLength(1);
+      expect(chatReview[0]?.[1].Properties.MemorySize).toBe(1024);
     });
 
     const policyOf = (prefix: string) =>
