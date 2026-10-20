@@ -118,9 +118,9 @@ export default function CameraSendPage() {
       <main className="fixed inset-0 z-50 bg-black">
         <video ref={livePreview} aria-label="送信中のカメラ映像" className="absolute inset-0 size-full object-contain" autoPlay muted playsInline />
         {sender.state.status === 'reconnecting' && <p role="status" className="absolute top-4 left-1/2 -translate-x-1/2 rounded-full bg-black/60 px-4 py-2 text-sm text-white">再接続中…</p>}
-        <div className="absolute inset-x-0 bottom-0 flex flex-col items-center gap-5 px-6 pb-[max(2rem,env(safe-area-inset-bottom))]">
+        <div className="camera-live-controls absolute inset-x-0 bottom-0 flex flex-col items-center gap-5 px-6 pb-[max(2rem,env(safe-area-inset-bottom))]">
           {zoom && (
-            <div className="flex items-center gap-4 rounded-full bg-black/60 px-3 py-2 text-white">
+            <div className="camera-live-zoom flex items-center gap-4 rounded-full bg-black/60 px-3 py-2 text-white">
               <Button variant="secondary" size="icon" className="size-11 rounded-full" aria-label="ズームアウト" disabled={zoom.value <= zoom.min} onClick={() => void changeZoom(-1)}><Minus aria-hidden /></Button>
               <span className="min-w-12 text-center text-sm tabular-nums">{zoom.value.toFixed(1)}×</span>
               <Button variant="secondary" size="icon" className="size-11 rounded-full" aria-label="ズームイン" disabled={zoom.value >= zoom.max} onClick={() => void changeZoom(1)}><Plus aria-hidden /></Button>
