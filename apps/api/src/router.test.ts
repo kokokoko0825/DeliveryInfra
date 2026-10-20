@@ -390,98 +390,96 @@ describe('stage tokens and device slots', () => {
   });
 });
 
-describe('venue speaker signaling', () => {
-  it.each(['viewer', 'camera', 'presenter'] as const)(
-    'allows %s to use both signaling sides',
-    async (role) => {
-      for (const side of ['mic', 'speaker'] as const) {
-        const response = await request(role, 'PUT', `/venue-speaker/${side}`, {
-          type: side === 'mic' ? 'offer' : 'answer',
-          sdp: 'v=0',
-        });
-        expect(response.statusCode).toBe(200);
-      }
-      expect(ddb.commandCalls(PutCommand)).toHaveLength(2);
-    },
-  );
-
-  it.each(['viewer', 'camera', 'presenter'] as const)('allows %s speaker clients to clean up only their own signal', async (role) => {
-    ddb.on(GetCommand).resolves({ Item: { PK: 'VENUE_SPEAKER#CURRENT', SK: 'speaker', userId: 'user-1' } });
-    await expect(request(role, 'DELETE', '/venue-speaker/speaker')).resolves.toMatchObject({ statusCode: 200 });
-    const deletes = ddb.commandCalls(DeleteCommand).length;
-    ddb.on(GetCommand).resolves({ Item: { PK: 'VENUE_SPEAKER#CURRENT', SK: 'speaker', userId: 'someone-else' } });
-    await expect(request(role, 'DELETE', '/venue-speaker/speaker')).resolves.toMatchObject({ statusCode: 404 });
-    expect(ddb.commandCalls(DeleteCommand)).toHaveLength(deletes);
-  });
-
-  it.each([
-    ['mic answer', 'mic', { type: 'answer', sdp: 'v=0' }],
-    ['speaker offer', 'speaker', { type: 'offer', sdp: 'v=0' }],
-    ['empty SDP', 'mic', { type: 'offer', sdp: '' }],
-    ['invalid signal type', 'speaker', { type: 'candidate', sdp: 'v=0' }],
-  ] as const)('rejects %s without storing it', async (_name, side, body) => {
-    const response = await request('audio', 'PUT', `/venue-speaker/${side}`, body);
-    expect(response.statusCode).toBe(400);
-    if (_name === 'mic answer' || _name === 'speaker offer') {
-      expect(data(response).error?.message).toBe('SDP の役割が不正です');
-    }
-    expect(ddb.commandCalls(PutCommand)).toHaveLength(0);
-  });
-
-  it('rejects unsupported signaling methods without reading or writing signals', async () => {
-    const response = await request('audio', 'POST', '/venue-speaker/mic', { type: 'offer', sdp: 'v=0' });
-    expect(response.statusCode).toBe(404);
-    expect(ddb.commandCalls(GetCommand)).toHaveLength(0);
-    expect(ddb.commandCalls(PutCommand)).toHaveLength(0);
-  });
-
-  it('stores valid offers and answers with a 90 second TTL', async () => {
-    for (const [side, type] of [['mic', 'offer'], ['speaker', 'answer']] as const) {
-      const response = await request('audio', 'PUT', `/venue-speaker/${side}`, { type, sdp: 'v=0' });
-      expect(response.statusCode).toBe(200);
-      expect(data(response)).toEqual({ expiresAt: new Date((NOW_S + 90) * 1000).toISOString() });
-      expect(ddb.commandCalls(PutCommand).at(-1)?.args[0].input.Item).toMatchObject({
-        PK: 'VENUE_SPEAKER#CURRENT', SK: side, type, sdp: 'v=0', userId: 'user-1', ttl: NOW_S + 90,
-      });
-    }
-  });
-
-  it('returns the opposite side signal and performs a consistent read', async () => {
-    ddb.on(GetCommand).resolves({ Item: { type: 'offer', sdp: 'remote-sdp', ttl: NOW_S + 10 } });
-    await expect(request('audio', 'GET', '/venue-speaker/mic')).resolves.toMatchObject({
-      statusCode: 200,
-      body: JSON.stringify({ type: 'offer', sdp: 'remote-sdp' }),
-    });
-    await expect(request('audio', 'GET', '/venue-speaker/speaker')).resolves.toMatchObject({
-      statusCode: 200,
-      body: JSON.stringify({ type: 'offer', sdp: 'remote-sdp' }),
-    });
-    expect(ddb.commandCalls(GetCommand).map((call) => call.args[0].input)).toEqual([
-      { TableName: 'table', Key: { PK: 'VENUE_SPEAKER#CURRENT', SK: 'speaker' }, ConsistentRead: true },
-      { TableName: 'table', Key: { PK: 'VENUE_SPEAKER#CURRENT', SK: 'mic' }, ConsistentRead: true },
-    ]);
-  });
-
-  it('hides an expired peer signal', async () => {
-    ddb.on(GetCommand).resolves({ Item: { PK: 'VENUE_SPEAKER#CURRENT', SK: 'speaker', type: 'answer', sdp: 'v=0', ttl: NOW_S } });
-    const response = await request('audio', 'GET', '/venue-speaker/mic');
+describe('room scoped venue speaker signaling', () => {
+  const base = '/venue-speaker/rooms/room-a';
+  it.each(['viewer', 'camera', 'audio', 'presenter', 'admin'] as const)('allows authenticated role %s to register in a room', async (role) => {
+    const response = await request(role, 'POST', `${base}/participants`, { side: 'mic', slot: 1 });
     expect(response.statusCode).toBe(200);
-    expect(data(response)).toBeNull();
+    expect(ddb.commandCalls(PutCommand)[0]?.args[0].input).toMatchObject({ Item: { PK: 'VENUE_ROOM#room-a', SK: 'participant#mic#1', userId: 'user-1', ttl: NOW_S + 300 }, ConditionExpression: 'attribute_not_exists(PK) OR #ttl <= :now' });
   });
-
-  it('allows only the signal owner to delete it (admins can clean up any signal)', async () => {
-    await expect(request('admin', 'DELETE', '/venue-speaker/mic')).resolves.toMatchObject({ statusCode: 200 });
+  it.each([{ side: 'mic', max: 3 }, { side: 'speaker', max: 5 }] as const)('enforces $max collision safe $side slots', async ({ side, max }) => {
+    const slots = new Map<string, number>();
+    ddb.on(PutCommand).callsFake(async (input) => {
+      const key = String(input.Item?.SK); if ((slots.get(key) ?? 0) === 1 && Number(input.ExpressionAttributeValues?.[':now']) < NOW_S + 300) throw conditionalError(); slots.set(key, 1); return {};
+    });
+    for (let i = 1; i <= max; i++) expect((await request('viewer', 'POST', `${base}/participants`, { side, slot: i })).statusCode).toBe(200);
+    expect((await request('viewer', 'POST', `${base}/participants`, { side, slot: 1 })).statusCode).toBe(409);
+    expect(slots.size).toBe(max);
+  });
+  it('allows only one of two concurrent reservations for the same slot', async () => {
+    let occupied = false;
+    ddb.on(PutCommand).callsFake(async () => { if (occupied) throw conditionalError(); occupied = true; return {}; });
+    const responses = await Promise.all([
+      request('viewer', 'POST', `${base}/participants`, { side: 'speaker', slot: 3 }, 'first'),
+      request('viewer', 'POST', `${base}/participants`, { side: 'speaker', slot: 3 }, 'second'),
+    ]);
+    expect(responses.map((response) => response.statusCode).sort()).toEqual([200, 409]);
+  });
+  it('rejects invalid registration payloads and invalid methods', async () => {
+    expect((await request('viewer', 'POST', `${base}/participants`, { side: 'mic', slot: 4 })).statusCode).toBe(400);
+    expect((await request('viewer', 'POST', `${base}/participants`, { side: 'speaker', slot: 6 })).statusCode).toBe(400);
+    expect((await request('viewer', 'POST', `${base}/offers/1/1`, {})).statusCode).toBe(404);
+  });
+  it('lists only unexpired room participants', async () => {
+    ddb.on(QueryCommand).resolves({ Items: [{ PK: 'VENUE_ROOM#room-a', SK: 'participant#mic#1', participantId: 'active', userId: 'u1', side: 'mic', slot: 1, ttl: NOW_S + 1 }, { PK: 'VENUE_ROOM#room-a', SK: 'participant#mic#2', participantId: 'expired', ttl: NOW_S }] });
+    expect(data(await request('viewer', 'GET', `${base}/participants`))).toEqual([{ participantId: 'active', side: 'mic', slot: 1 }]);
+  });
+  it('isolates offer/answer exchange by room and mic-speaker pair, enforcing owners and TTL', async () => {
+    ddb.on(GetCommand).callsFake(async (input) => input.Key?.SK === 'participant#mic#2' ? { Item: { participantId: 'mic-id', userId: 'user-1', ttl: NOW_S + 30 } } : {});
+    const put = await request('audio', 'PUT', `${base}/offers/2/4`, { type: 'offer', sdp: 'offer-sdp' });
+    expect(put.statusCode).toBe(200);
+    expect(ddb.commandCalls(PutCommand).at(-1)?.args[0].input.Item).toMatchObject({ PK: 'VENUE_ROOM#room-a', SK: 'offers#2#4', participantId: 'mic-id', ttl: NOW_S + 90 });
+    ddb.on(GetCommand).callsFake(async (input) => {
+      if (input.Key?.SK === 'participant#speaker#4') return { Item: { participantId: 'speaker-id', userId: 'speaker', ttl: NOW_S + 30 } };
+      if (input.Key?.SK === 'participant#mic#2') return { Item: { participantId: 'mic-id', userId: 'user-1', ttl: NOW_S + 30 } };
+      return { Item: { type: 'offer', sdp: 'offer-sdp', participantId: 'mic-id', ttl: NOW_S + 30 } };
+    });
+    expect(data(await request('viewer', 'GET', `${base}/offers/2/4`))).toEqual({ type: 'offer', sdp: 'offer-sdp' });
+    expect(ddb.commandCalls(GetCommand).at(-1)?.args[0].input.Key).toEqual({ PK: 'VENUE_ROOM#room-a', SK: 'offers#2#4' });
+    const answerPut = await request('viewer', 'PUT', `${base}/answers/2/4`, { type: 'answer', sdp: 'answer-sdp' }, 'speaker');
+    expect(answerPut.statusCode).toBe(200);
+    expect(ddb.commandCalls(PutCommand).at(-1)?.args[0].input.Item).toMatchObject({ SK: 'answers#2#4', participantId: 'speaker-id' });
+    ddb.on(GetCommand).callsFake(async (input) => {
+      if (input.Key?.SK === 'participant#mic#2') return { Item: { participantId: 'mic-id', userId: 'user-1', ttl: NOW_S + 30 } };
+      if (input.Key?.SK === 'participant#speaker#4') return { Item: { participantId: 'speaker-id', userId: 'speaker', ttl: NOW_S + 30 } };
+      return { Item: { type: 'answer', sdp: 'answer-sdp', participantId: 'speaker-id', ttl: NOW_S + 30 } };
+    });
+    expect(data(await request('viewer', 'GET', `${base}/answers/2/4`))).toEqual({ type: 'answer', sdp: 'answer-sdp' });
+    ddb.on(GetCommand).callsFake(async (input) => {
+      if (input.Key?.SK === 'participant#mic#2') return { Item: { participantId: 'mic-id', ttl: NOW_S + 30 } };
+      if (input.Key?.SK === 'participant#speaker#4') return { Item: { participantId: 'speaker-id', ttl: NOW_S + 30 } };
+      return { Item: { type: 'answer', sdp: 'old', participantId: 'speaker-id', ttl: NOW_S } };
+    });
+    expect(data(await request('viewer', 'GET', `${base}/answers/2/4`))).toBeNull();
+    ddb.on(GetCommand).resolves({ Item: { participantId: 'mic-id', userId: 'other', ttl: NOW_S + 30 } });
+    expect((await request('audio', 'PUT', `${base}/offers/2/4`, { type: 'offer', sdp: 'x' })).statusCode).toBe(404);
+  });
+  it('restricts participant leave and signal cleanup to the owner', async () => {
+    ddb.on(QueryCommand).resolves({ Items: [{ PK: 'VENUE_ROOM#room-a', SK: 'participant#mic#1', participantId: 'p1', userId: 'owner', ttl: NOW_S + 10 }] });
+    expect((await request('viewer', 'DELETE', `${base}/participants/p1`)).statusCode).toBe(404);
     expect(ddb.commandCalls(DeleteCommand)).toHaveLength(0);
-
-    ddb.on(GetCommand).resolves({ Item: { PK: 'VENUE_SPEAKER#CURRENT', SK: 'mic', userId: 'someone-else' } });
-    await expect(request('audio', 'DELETE', '/venue-speaker/mic')).resolves.toMatchObject({ statusCode: 404 });
-    expect(ddb.commandCalls(DeleteCommand)).toHaveLength(0);
-
-    await expect(request('audio', 'DELETE', '/venue-speaker/mic', undefined, 'someone-else')).resolves.toMatchObject({ statusCode: 200 });
-    expect(ddb.commandCalls(DeleteCommand).at(-1)?.args[0].input).toMatchObject({ Key: { PK: 'VENUE_SPEAKER#CURRENT', SK: 'mic' } });
-
-    await expect(request('admin', 'DELETE', '/venue-speaker/mic')).resolves.toMatchObject({ statusCode: 200 });
-    expect(ddb.commandCalls(DeleteCommand)).toHaveLength(2);
+    expect((await request('viewer', 'DELETE', `${base}/participants/p1`, undefined, 'owner')).statusCode).toBe(200);
+    expect(ddb.commandCalls(DeleteCommand).at(-1)?.args[0].input.ConditionExpression).toContain('userId = :userId');
+  });
+  it('renews only an active participant lease owned by the caller', async () => {
+    ddb.on(QueryCommand).resolves({ Items: [{ PK: 'VENUE_ROOM#room-a', SK: 'participant#mic#1', participantId: 'p1', userId: 'user-1', ttl: NOW_S + 10 }] });
+    const renewed = await request('viewer', 'PATCH', `${base}/participants/p1`);
+    expect(renewed.statusCode).toBe(200);
+    expect(data(renewed)).toEqual({ expiresAt: new Date((NOW_S + 300) * 1000).toISOString() });
+    expect(ddb.commandCalls(UpdateCommand).at(-1)?.args[0].input).toMatchObject({
+      Key: { PK: 'VENUE_ROOM#room-a', SK: 'participant#mic#1' },
+      UpdateExpression: 'SET #ttl = :ttl',
+      ConditionExpression: 'participantId = :id AND userId = :userId AND #ttl > :now',
+    });
+    ddb.on(QueryCommand).resolves({ Items: [{ PK: 'VENUE_ROOM#room-a', SK: 'participant#mic#1', participantId: 'p1', userId: 'someone-else', ttl: NOW_S + 10 }] });
+    expect((await request('viewer', 'PATCH', `${base}/participants/p1`, undefined, 'owner')).statusCode).toBe(404);
+    ddb.on(QueryCommand).resolves({ Items: [{ PK: 'VENUE_ROOM#room-a', SK: 'participant#mic#1', participantId: 'p1', userId: 'user-1', ttl: NOW_S }] });
+    expect((await request('viewer', 'PATCH', `${base}/participants/p1`)).statusCode).toBe(404);
+    expect(ddb.commandCalls(UpdateCommand)).toHaveLength(1);
+  });
+  it('deliberately retires the global legacy endpoints', async () => {
+    expect((await request('audio', 'PUT', '/venue-speaker/mic', { type: 'offer', sdp: 'legacy' })).statusCode).toBe(404);
+    expect(ddb.commandCalls(PutCommand)).toHaveLength(0);
   });
 });
 

@@ -412,25 +412,83 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
       const request = valid(StageTokenRequestSchema, body);
       return success(await issueStageToken(principal, request.purpose, request.deviceName, request.takeover));
     }
-    if (parts[0] === 'venue-speaker' && parts.length === 2 && ['mic', 'speaker'].includes(parts[1]!)) {
-      const side = parts[1]!;
-      const peerSide = side === 'mic' ? 'speaker' : 'mic';
-      if (method === 'PUT') {
-        const signal = valid(VenueSignalSchema, body);
-        if ((side === 'mic' && signal.type !== 'offer') || (side === 'speaker' && signal.type !== 'answer')) throw badRequest('SDP の役割が不正です');
-        const ttl = nowSeconds() + 90;
-        await db.put(entity(KEYS.venueSpeakerPk, side, { ...signal, userId: principal.userId, updatedAt: iso(now()), ttl }));
+    // Room-scoped local WebRTC signaling. DynamoDB's existing table provides
+    // atomic slot reservations; TTL is checked in application code as well.
+    if (parts[0] === 'venue-speaker' && parts[1] === 'rooms' && parts.length >= 4) {
+      const roomId = parts[2]!;
+      if (!/^[A-Za-z0-9_-]{1,64}$/u.test(roomId)) throw badRequest('roomId が不正です');
+      const roomPk = `VENUE_ROOM#${roomId}`;
+      const participantSk = (side: string, slot: number) => `participant#${side}#${slot}`;
+      if (parts[3] === 'participants' && parts.length === 4) {
+        if (method === 'POST') {
+          const input = body as Record<string, unknown>;
+          const side = input?.side;
+          const slot = input?.slot;
+          if ((side !== 'mic' && side !== 'speaker') || !Number.isInteger(slot) || (slot as number) < 1 || (slot as number) > (side === 'mic' ? 3 : 5)) throw badRequest('side または slot が不正です');
+          const participantId = randomUUID();
+          const ttl = nowSeconds() + 300;
+          try {
+            await db.put(entity(roomPk, participantSk(side, slot as number), { participantId, userId: principal.userId, side, slot, ttl, createdAt: iso(now()) }), 'attribute_not_exists(PK) OR #ttl <= :now', { ':now': nowSeconds() }, { '#ttl': 'ttl' });
+          } catch (error) {
+            if (isConditionalFailure(error)) throw conflict('VENUE_SLOT_IN_USE', 'このスロットは使用中です');
+            throw error;
+          }
+          return success({ participantId, side, slot, expiresAt: iso(ttl * 1000) });
+        }
+        if (method === 'GET') {
+          const list = await db.query<Entity & { participantId?: string; userId?: string; side?: string; slot?: number; ttl?: number }>(roomPk, { skPrefix: 'participant#', consistentRead: true });
+          return success(list.filter((p) => Number(p.ttl) > nowSeconds()).map(({ participantId, side, slot }) => ({ participantId, side, slot })));
+        }
+      }
+      if (parts[3] === 'participants' && parts.length === 5 && method === 'DELETE') {
+        const id = parts[4]!;
+        const list = await db.query<Entity & { participantId?: string; userId?: string; ttl?: number }>(roomPk, { skPrefix: 'participant#', consistentRead: true });
+        const participant = list.find((p) => p.participantId === id && Number(p.ttl) > nowSeconds());
+        if (!participant || participant.userId !== principal.userId) throw notFound();
+        await db.delete(roomPk, participant.SK, 'participantId = :id AND userId = :userId', { ':id': id, ':userId': principal.userId });
+        return success();
+      }
+      if (parts[3] === 'participants' && parts.length === 5 && method === 'PATCH') {
+        const id = parts[4]!;
+        const list = await db.query<Entity & { participantId?: string; userId?: string; ttl?: number }>(roomPk, { skPrefix: 'participant#', consistentRead: true });
+        const participant = list.find((p) => p.participantId === id && Number(p.ttl) > nowSeconds());
+        if (!participant || participant.userId !== principal.userId) throw notFound();
+        const ttl = nowSeconds() + 300;
+        await orNotFound(db.update(roomPk, participant.SK, 'SET #ttl = :ttl', { ':ttl': ttl, ':id': id, ':userId': principal.userId, ':now': nowSeconds() }, 'participantId = :id AND userId = :userId AND #ttl > :now', { '#ttl': 'ttl' }));
         return success({ expiresAt: iso(ttl * 1000) });
       }
-      if (method === 'GET') {
-        const signal = await db.get<Entity & { type?: string; sdp?: string; ttl?: number }>(KEYS.venueSpeakerPk, peerSide, true);
-        return success(signal && Number(signal.ttl) > nowSeconds() ? { type: signal.type, sdp: signal.sdp } : null);
-      }
-      if (method === 'DELETE') {
-        const signal = await db.get<Entity & { userId?: string }>(KEYS.venueSpeakerPk, side, true);
-        if (signal?.userId !== principal.userId && principal.role !== 'admin') throw notFound();
-        if (signal) await db.delete(KEYS.venueSpeakerPk, side);
-        return success();
+      if ((parts[3] === 'offers' || parts[3] === 'answers') && parts.length === 6) {
+        const kind = parts[3];
+        const micSlot = Number(parts[4]); const speakerSlot = Number(parts[5]);
+        if (!Number.isInteger(micSlot) || micSlot < 1 || micSlot > 3 || !Number.isInteger(speakerSlot) || speakerSlot < 1 || speakerSlot > 5) throw badRequest('slot が不正です');
+        const side = kind === 'offers' ? 'mic' : 'speaker'; const slot = kind === 'offers' ? micSlot : speakerSlot;
+        const accessSide = method === 'GET' ? (kind === 'offers' ? 'speaker' : 'mic') : side;
+        const accessSlot = method === 'GET' ? (kind === 'offers' ? speakerSlot : micSlot) : slot;
+        const owner = await db.get<Entity & { userId?: string; participantId?: string; ttl?: number }>(roomPk, participantSk(accessSide, accessSlot), true);
+        if (!owner || Number(owner.ttl) <= nowSeconds() || (method !== 'GET' && owner.userId !== principal.userId)) throw notFound();
+        const sk = `${kind}#${micSlot}#${speakerSlot}`;
+        if (method === 'PUT') {
+          const signal = valid(VenueSignalSchema, body);
+          if (signal.type !== (kind === 'offers' ? 'offer' : 'answer')) throw badRequest('SDP の役割が不正です');
+          const ttl = nowSeconds() + 90;
+          await db.put(entity(roomPk, sk, { ...signal, userId: principal.userId, participantId: owner.participantId, updatedAt: iso(now()), ttl }));
+          return success({ expiresAt: iso(ttl * 1000) });
+        }
+        if (method === 'GET') {
+          const signalOwnerSide = kind === 'offers' ? 'mic' : 'speaker';
+          const signalOwnerSlot = kind === 'offers' ? micSlot : speakerSlot;
+          const signalOwner = await db.get<Entity & { participantId?: string; ttl?: number }>(roomPk, participantSk(signalOwnerSide, signalOwnerSlot), true);
+          const signal = await db.get<Entity & { type?: string; sdp?: string; participantId?: string; ttl?: number }>(roomPk, sk, true);
+          return success(signal && signalOwner && Number(signal.ttl) > nowSeconds() && Number(signalOwner.ttl) > nowSeconds() && signal.participantId === signalOwner.participantId
+            ? { type: signal.type, sdp: signal.sdp }
+            : null);
+        }
+        if (method === 'DELETE') {
+          const signal = await db.get<Entity & { userId?: string; participantId?: string }>(roomPk, sk, true);
+          if (signal && (signal.userId !== principal.userId || signal.participantId !== owner.participantId)) throw notFound();
+          if (signal) await db.delete(roomPk, sk, 'userId = :userId AND participantId = :participantId', { ':userId': principal.userId, ':participantId': owner.participantId });
+          return success();
+        }
       }
     }
     if (parts[0] === 'devices') {
