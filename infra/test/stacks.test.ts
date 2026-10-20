@@ -60,9 +60,9 @@ describe('stg(既定)', () => {
   });
 
   describe('Cognito', () => {
-    it('自己サインアップ不可・パスワード12文字以上(大小英字・数字)', () => {
+    it('自己サインアップ可・パスワード12文字以上(大小英字・数字)', () => {
       t.main.hasResourceProperties('AWS::Cognito::UserPool', {
-        AdminCreateUserConfig: Match.objectLike({ AllowAdminCreateUserOnly: true }),
+        AdminCreateUserConfig: Match.objectLike({ AllowAdminCreateUserOnly: false }),
         Policies: {
           PasswordPolicy: Match.objectLike({
             MinimumLength: 12,

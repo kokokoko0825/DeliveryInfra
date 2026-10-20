@@ -207,7 +207,7 @@ export class DeliveryStack extends Stack {
     const userPool = new cognito.UserPool(this, 'UserPool', {
       userPoolName: `${config.prefix}-users`,
       featurePlan: cognito.FeaturePlan.LITE,
-      selfSignUpEnabled: false,
+      selfSignUpEnabled: true,
       signInAliases: { email: true },
       autoVerify: { email: true },
       standardAttributes: { email: { required: true, mutable: true } },

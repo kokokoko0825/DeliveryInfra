@@ -1,14 +1,14 @@
 /**
  * 受信映像トラックを合成用の <video> 要素として保持し、フレームの進みを記録する。
- * requestVideoFrameCallback は背面タブで止まるため、デコード済みフレーム数をタイマーで調べる。
+ * requestVideoFrameCallback は背面タブで止まるため、タイマーでフレーム数と再生時刻の進行を調べる。
  */
 import type { SourceId } from '../engine/scene';
 
-type Entry = { track: MediaStreamTrack; video: HTMLVideoElement; frames: number; lastFrameAt: number | null };
+type Entry = { track: MediaStreamTrack; video: HTMLVideoElement; frames: number | null; mediaTime: number | null; lastFrameAt: number | null };
 
-const decodedFrames = (video: HTMLVideoElement): number => {
+const decodedFrames = (video: HTMLVideoElement): number | null => {
   const quality = typeof video.getVideoPlaybackQuality === 'function' ? video.getVideoPlaybackQuality() : null;
-  return quality ? quality.totalVideoFrames : Math.round(video.currentTime * 1000);
+  return quality?.totalVideoFrames ?? null;
 };
 
 export function createVideoRegistry() {
@@ -33,7 +33,7 @@ export function createVideoRegistry() {
       video.playsInline = true;
       video.srcObject = new MediaStream([track]);
       void video.play().catch(() => undefined);
-      entries.set(source, { track, video, frames: -1, lastFrameAt: null });
+      entries.set(source, { track, video, frames: null, mediaTime: null, lastFrameAt: null });
     },
     element: (source: SourceId) => entries.get(source)?.video ?? null,
     stream: (source: SourceId) => (entries.get(source)?.video.srcObject as MediaStream | null | undefined) ?? null,
@@ -42,10 +42,14 @@ export function createVideoRegistry() {
       const result = new Map<SourceId, number | null>();
       for (const [source, entry] of entries) {
         const frames = decodedFrames(entry.video);
-        if (frames !== entry.frames && entry.video.readyState >= 2) {
-          entry.frames = frames;
+        const mediaTime = entry.video.currentTime;
+        const frameAdvanced = frames !== null && entry.frames !== null && frames > entry.frames;
+        const timeAdvanced = entry.mediaTime !== null && mediaTime > entry.mediaTime + 0.001;
+        if (entry.video.readyState >= 2 && (entry.lastFrameAt === null || frameAdvanced || timeAdvanced)) {
           entry.lastFrameAt = now;
         }
+        entry.frames = frames;
+        entry.mediaTime = mediaTime;
         result.set(source, entry.track.readyState === 'ended' ? null : entry.lastFrameAt);
       }
       return result;

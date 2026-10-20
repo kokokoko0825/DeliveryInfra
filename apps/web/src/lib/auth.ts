@@ -1,5 +1,5 @@
 import { Amplify } from 'aws-amplify';
-import { confirmResetPassword, confirmSignIn, fetchAuthSession, resetPassword, signIn, signInWithRedirect, signOut } from 'aws-amplify/auth';
+import { confirmResetPassword, confirmSignIn, confirmSignUp, fetchAuthSession, resetPassword, signIn, signInWithRedirect, signOut, signUp } from 'aws-amplify/auth';
 import 'aws-amplify/auth/enable-oauth-listener';
 import type { RuntimeConfig } from './config';
 
@@ -37,6 +37,14 @@ export function toSignInResult(step: string): SignInResult {
 export async function loginWithEmail(email: string, password: string): Promise<SignInResult> {
   const { nextStep } = await signIn({ username: email, password });
   return toSignInResult(nextStep.signInStep);
+}
+
+export async function registerWithEmail(email: string, password: string): Promise<void> {
+  await signUp({ username: email, password, options: { userAttributes: { email } } });
+}
+
+export async function confirmEmailRegistration(email: string, confirmationCode: string): Promise<void> {
+  await confirmSignUp({ username: email, confirmationCode });
 }
 
 export async function completeNewPassword(newPassword: string): Promise<SignInResult> {

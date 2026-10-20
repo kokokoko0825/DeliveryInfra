@@ -3,6 +3,7 @@ import type { Feature } from '@delivery/shared';
 import { getPostLoginPath } from '@delivery/shared';
 import { lazy, Suspense, type ReactNode } from 'react';
 import LoginPage from './features/auth/LoginPage';
+import SignUpPage from './features/auth/SignUpPage';
 import PasswordPage from './features/auth/PasswordPage';
 import DisplayNamePage from './features/auth/DisplayNamePage';
 import { RequireAuth } from './features/auth/RequireAuth';
@@ -36,6 +37,7 @@ export function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/signup" element={<SignUpPage />} />
       <Route path="/password" element={<PasswordPage />} />
       <Route path="/display-name" element={<RequireAuth requireDisplayName={false}><DisplayNamePage /></RequireAuth>} />
       <Route element={<RequireAuth />}>

@@ -22,12 +22,14 @@ export function createCognitoPostAuthenticationHandler(dependencies?: { env?: Co
     const attrs = event.request.userAttributes;
     const externalIdp = Boolean(attrs.identities && attrs.identities !== '[]');
     const isFirstExternalConfirmation = event.triggerSource === 'PostConfirmation_ConfirmSignUp' && externalIdp;
+    const isFirstEmailConfirmation = event.triggerSource === 'PostConfirmation_ConfirmSignUp' && !externalIdp;
     const isPostAuthentication = event.triggerSource === 'PostAuthentication_Authentication';
-    if (!isFirstExternalConfirmation && !isPostAuthentication) return event;
+    if (!isFirstExternalConfirmation && !isFirstEmailConfirmation && !isPostAuthentication) return event;
     const memberships = await clients.cognito.send(new AdminListGroupsForUserCommand({ UserPoolId: event.userPoolId, Username: username }));
     const groups = memberships.Groups ?? [];
-    if (groups.length === 0 && externalIdp) await clients.cognito.send(new AdminAddUserToGroupCommand({ UserPoolId: event.userPoolId, Username: username, GroupName: 'viewer' }));
+    if (groups.length === 0 && (externalIdp || isFirstEmailConfirmation)) await clients.cognito.send(new AdminAddUserToGroupCommand({ UserPoolId: event.userPoolId, Username: username, GroupName: 'viewer' }));
     else if (groups.length !== 1 || !RoleSchema.safeParse(groups[0]?.GroupName).success) throw new Error('Cognito user must belong to exactly one valid role group');
+    if (isFirstEmailConfirmation) return event;
     const userId = attrs.sub;
     if (!userId) throw new Error('Cognito user sub attribute is required');
     const now = dependencies?.now?.() ?? Date.now();

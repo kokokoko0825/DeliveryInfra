@@ -21,30 +21,32 @@ export function TransitionPanel({ state, dispatch }: { state: SwitcherState; dis
   const durationId = useId();
   return (
     <Card className="gap-4 py-4">
-      <CardContent className="flex flex-col gap-4 px-4 lg:flex-row lg:items-end">
-        <div className="space-y-2">
-          <Label id={`${durationId}-type`}>切替効果</Label>
-          <ToggleGroup type="single" variant="outline" aria-labelledby={`${durationId}-type`} value={state.transitionType}
-            onValueChange={(value) => value && dispatch({ type: 'SET_TRANSITION_TYPE', transitionType: value as TransitionType })}>
-            {TRANSITION_TYPES.map((type) => <ToggleGroupItem key={type} value={type} className="h-11 px-4">{TRANSITION_LABEL[type]}</ToggleGroupItem>)}
-          </ToggleGroup>
-        </div>
-        <div className="min-w-48 flex-1 space-y-3">
-          <div className="flex justify-between text-sm">
-            <Label htmlFor={durationId}>時間</Label>
-            <span className="tabular-nums text-muted-foreground">{state.durationSec.toFixed(1)} 秒</span>
+      <CardContent className="grid min-w-0 gap-4 px-4">
+        <div className="grid min-w-0 grid-cols-1 gap-4 sm:grid-cols-2">
+          <div className="min-w-0 space-y-2">
+            <Label id={`${durationId}-type`}>切替効果</Label>
+            <ToggleGroup type="single" variant="outline" aria-labelledby={`${durationId}-type`} value={state.transitionType} className="grid w-full grid-cols-3"
+              onValueChange={(value) => value && dispatch({ type: 'SET_TRANSITION_TYPE', transitionType: value as TransitionType })}>
+              {TRANSITION_TYPES.map((type) => <ToggleGroupItem key={type} value={type} className="h-11 min-w-0 px-2">{TRANSITION_LABEL[type]}</ToggleGroupItem>)}
+            </ToggleGroup>
           </div>
-          <Slider id={durationId} aria-label="トランジション時間" min={TRANSITION_MIN_SEC} max={TRANSITION_MAX_SEC} step={0.1}
-            value={[state.durationSec]} disabled={state.transitionType === 'cut'}
-            onValueChange={([value]) => value !== undefined && dispatch({ type: 'SET_DURATION', seconds: Math.round(value * 10) / 10 })} />
+          <div className="min-w-0 space-y-3">
+            <div className="flex justify-between text-sm">
+              <Label htmlFor={durationId}>時間</Label>
+              <span className="tabular-nums text-muted-foreground">{state.durationSec.toFixed(1)} 秒</span>
+            </div>
+            <Slider id={durationId} aria-label="トランジション時間" min={TRANSITION_MIN_SEC} max={TRANSITION_MAX_SEC} step={0.1}
+              value={[state.durationSec]} disabled={state.transitionType === 'cut'}
+              onValueChange={([value]) => value !== undefined && dispatch({ type: 'SET_DURATION', seconds: Math.round(value * 10) / 10 })} />
+          </div>
         </div>
-        <div className="flex gap-2">
-          <Button variant="outline" className="h-11 flex-1 lg:flex-none" onMouseDown={keepFocus} onClick={() => dispatch({ type: 'CUT' })}>
-            <Scissors aria-hidden />カット<kbd className="text-xs text-muted-foreground">Space</kbd>
+        <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+          <Button variant="outline" className="h-11 w-full min-w-0 sm:w-auto" onMouseDown={keepFocus} onClick={() => dispatch({ type: 'CUT' })}>
+            <Scissors aria-hidden />カット<kbd className="whitespace-nowrap text-xs text-muted-foreground">Space</kbd>
           </Button>
-          <Button className="h-11 flex-1 lg:flex-none" onMouseDown={keepFocus} disabled={state.active !== null}
+          <Button className="h-11 w-full min-w-0 sm:w-auto" onMouseDown={keepFocus} disabled={state.active !== null}
             onClick={() => dispatch({ type: 'AUTO', now: performance.now() })}>
-            <ArrowRightLeft aria-hidden />トランジション<kbd className="text-xs opacity-80">Enter</kbd>
+            <ArrowRightLeft aria-hidden />トランジション<kbd className="whitespace-nowrap text-xs opacity-80">Enter</kbd>
           </Button>
         </div>
       </CardContent>
