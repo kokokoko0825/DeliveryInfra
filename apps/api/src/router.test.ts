@@ -392,19 +392,27 @@ describe('stage tokens and device slots', () => {
 
 describe('venue speaker signaling', () => {
   it.each(['viewer', 'camera', 'presenter'] as const)(
-    'rejects %s from both signaling sides before reading or writing signals',
+    'allows %s to use both signaling sides',
     async (role) => {
       for (const side of ['mic', 'speaker'] as const) {
         const response = await request(role, 'PUT', `/venue-speaker/${side}`, {
           type: side === 'mic' ? 'offer' : 'answer',
           sdp: 'v=0',
         });
-        expect(response.statusCode).toBe(403);
+        expect(response.statusCode).toBe(200);
       }
-      expect(ddb.commandCalls(GetCommand)).toHaveLength(0);
-      expect(ddb.commandCalls(PutCommand)).toHaveLength(0);
+      expect(ddb.commandCalls(PutCommand)).toHaveLength(2);
     },
   );
+
+  it.each(['viewer', 'camera', 'presenter'] as const)('allows %s speaker clients to clean up only their own signal', async (role) => {
+    ddb.on(GetCommand).resolves({ Item: { PK: 'VENUE_SPEAKER#CURRENT', SK: 'speaker', userId: 'user-1' } });
+    await expect(request(role, 'DELETE', '/venue-speaker/speaker')).resolves.toMatchObject({ statusCode: 200 });
+    const deletes = ddb.commandCalls(DeleteCommand).length;
+    ddb.on(GetCommand).resolves({ Item: { PK: 'VENUE_SPEAKER#CURRENT', SK: 'speaker', userId: 'someone-else' } });
+    await expect(request(role, 'DELETE', '/venue-speaker/speaker')).resolves.toMatchObject({ statusCode: 404 });
+    expect(ddb.commandCalls(DeleteCommand)).toHaveLength(deletes);
+  });
 
   it.each([
     ['mic answer', 'mic', { type: 'answer', sdp: 'v=0' }],

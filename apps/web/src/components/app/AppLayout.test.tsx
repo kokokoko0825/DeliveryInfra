@@ -13,10 +13,10 @@ const renderLayout = (role: Role, auth = makeAuth({ me: makeMe({ role, displayNa
 };
 
 describe('AppLayout', () => {
-  it('shows only user menus for viewers', () => {
+  it('shows user menus and both venue PoC pages for viewers', () => {
     renderLayout('viewer');
     const nav = screen.getAllByRole('link').map((link) => link.textContent);
-    expect(nav).toEqual(['配信視聴', 'スライド', 'アーカイブ']);
+    expect(nav).toEqual(['配信視聴', 'スライド', 'アーカイブ', '会場音声 PoC（マイク）', '会場音声 PoC（スピーカー）']);
     expect(screen.queryByText('管理')).not.toBeInTheDocument();
     expect(screen.getByText('視聴者')).toBeInTheDocument();
   });

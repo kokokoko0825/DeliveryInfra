@@ -413,7 +413,6 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
       return success(await issueStageToken(principal, request.purpose, request.deviceName, request.takeover));
     }
     if (parts[0] === 'venue-speaker' && parts.length === 2 && ['mic', 'speaker'].includes(parts[1]!)) {
-      if (!['audio', 'admin'].includes(principal.role)) throw forbidden();
       const side = parts[1]!;
       const peerSide = side === 'mic' ? 'speaker' : 'mic';
       if (method === 'PUT') {
