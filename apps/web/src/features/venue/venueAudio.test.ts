@@ -7,6 +7,7 @@ const api = vi.hoisted(() => ({
 vi.mock('@/lib/api', () => ({ apiFetch: api.fetch, ApiError: api.ApiError }));
 
 const { startVenueMic, startVenueSpeaker } = await import('./venueAudio');
+const STUN_URL = 'stun:stun.l.google.com:19302';
 
 const peers: FakePeer[] = [];
 const contexts: FakeAudioContext[] = [];
@@ -200,7 +201,8 @@ describe('venue room audio transport', () => {
     await waitForLinks(pairs);
     expect(peers.filter((peer) => peer.addTrack.mock.calls.length > 0)).toHaveLength(pairs);
     expect(peers.filter((peer) => peer.createDataChannel.mock.calls.length > 0).every((peer) => peer.createDataChannel.mock.calls[0]?.[0] === 'control')).toBe(true);
-    expect(peers.every((peer) => peer.configuration.iceServers?.length === 0)).toBe(true);
+    expect(peers.every((peer) => peer.configuration.iceServers?.length === 1 && peer.configuration.iceServers[0]?.urls === STUN_URL)).toBe(true);
+    expect(peers.every((peer) => !peer.configuration.iceServers?.some((server) => (Array.isArray(server.urls) ? server.urls : [server.urls]).some((url) => url.startsWith('turn:'))))).toBe(true);
     expect(sessions.every((session) => session.getMetrics().transport === 'audio-track')).toBe(true);
     expect(sessions.slice(0, micCount).every((session) => session.getMetrics().sentPackets === 0)).toBe(true);
     expect(contexts.every((context) => context.audioWorklet.addModule.mock.calls.length === 0)).toBe(true);
@@ -227,7 +229,8 @@ describe('venue room audio transport', () => {
     await waitForLinks(1);
     expect(offers.get('1/1')?.type).toBe('offer');
     expect(answers.get('1/1')?.type).toBe('answer');
-    expect(peers.every((peer) => peer.configuration.iceServers?.length === 0)).toBe(true);
+    expect(peers.every((peer) => peer.configuration.iceServers?.length === 1 && peer.configuration.iceServers[0]?.urls === STUN_URL)).toBe(true);
+    expect(peers.every((peer) => !peer.configuration.iceServers?.some((server) => (Array.isArray(server.urls) ? server.urls : [server.urls]).some((url) => url.startsWith('turn:'))))).toBe(true);
     expect(api.fetch.mock.calls.every(([path]) => String(path).includes('/venue-speaker/rooms/venue-poc/'))).toBe(true);
     expect(api.fetch.mock.calls.some(([path]) => /relay|turn:|stun:/iu.test(String(path)))).toBe(false);
     contexts[0]!.processor.port.onmessage?.({ data: new ArrayBuffer(960) } as MessageEvent);
@@ -285,7 +288,7 @@ describe('venue room audio transport', () => {
     peers[0]!.connectionState = 'failed';
     peers[0]!.onconnectionstatechange?.();
     await vi.waitFor(() => expect(peers.length).toBeGreaterThan(4), { timeout: 3000, interval: 30 });
-    expect(peers.slice(4).every((peer) => peer.configuration.iceServers?.length === 0)).toBe(true);
+    expect(peers.slice(4).every((peer) => peer.configuration.iceServers?.length === 1 && peer.configuration.iceServers[0]?.urls === STUN_URL)).toBe(true);
   });
 
   it('rejects the connection promise and closes links when every initial peer fails', async () => {

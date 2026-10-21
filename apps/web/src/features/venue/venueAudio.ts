@@ -70,6 +70,7 @@ type AudioController = {
 };
 
 const ROOM_ID = 'venue-poc';
+const ICE_SERVERS: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
 const DISCOVERY_INTERVAL_MS = 750;
 const SIGNAL_INTERVAL_MS = 300;
 const MAX_SIGNAL_POLLS = 300;
@@ -250,7 +251,7 @@ function createSession(
       metrics.seenSequences.clear();
     }
     peerParticipantIds.set(key, remote.participantId);
-    const link: Link = { peer: new RTCPeerConnection({ iceServers: [] }), remoteParticipantId: remote.participantId, micSlot: mic.slot, speakerSlot: speaker.slot, disconnectTimer: undefined, metrics };
+    const link: Link = { peer: new RTCPeerConnection({ iceServers: ICE_SERVERS }), remoteParticipantId: remote.participantId, micSlot: mic.slot, speakerSlot: speaker.slot, disconnectTimer: undefined, metrics };
     links.set(key, link);
     const peer = link.peer;
     peer.ontrack = ({ track, streams }) => {
