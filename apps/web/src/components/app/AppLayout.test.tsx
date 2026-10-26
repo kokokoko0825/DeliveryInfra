@@ -13,10 +13,10 @@ const renderLayout = (role: Role, auth = makeAuth({ me: makeMe({ role, displayNa
 };
 
 describe('AppLayout', () => {
-  it('shows user menus and both venue PoC pages for viewers', () => {
+  it('does not show operational audio controls to viewers', () => {
     renderLayout('viewer');
     const nav = screen.getAllByRole('link').map((link) => link.textContent);
-    expect(nav).toEqual(['配信視聴', 'スライド', 'アーカイブ', '会場音声 PoC（マイク）', '会場音声 PoC（スピーカー）']);
+    expect(nav).toEqual(['配信視聴', 'スライド', 'アーカイブ']);
     expect(screen.queryByText('管理')).not.toBeInTheDocument();
     expect(screen.getByText('視聴者')).toBeInTheDocument();
   });
@@ -27,10 +27,19 @@ describe('AppLayout', () => {
     expect(screen.queryByRole('link', { name: 'マイク送信' })).not.toBeInTheDocument();
   });
 
+  it('shows venue speaker controls only to audio staff and administrators', () => {
+    const { unmount } = renderPage(<AppLayout />, { auth: makeAuth({ me: makeMe({ role: 'audio', displayName: '音声担当' }) }), path: '/watch' });
+    expect(screen.getByRole('link', { name: '会場スピーカー' })).toHaveAttribute('href', '/venue/speaker');
+    unmount();
+
+    renderLayout('presenter');
+    expect(screen.queryByRole('link', { name: '会場スピーカー' })).not.toBeInTheDocument();
+  });
+
   it('adds the admin menu for admins', () => {
     renderLayout('admin');
     expect(screen.getByText('管理')).toBeInTheDocument();
-    for (const name of ['スイッチング', 'スライド管理', 'コメント管理', 'ユーザー管理', 'カメラ送信', 'マイク送信', 'スライド共有']) {
+    for (const name of ['スイッチング', 'スライド管理', 'コメント管理', 'ユーザー管理', 'カメラ送信', 'マイク送信', '会場スピーカー', 'スライド共有']) {
       expect(screen.getByRole('link', { name })).toBeInTheDocument();
     }
   });

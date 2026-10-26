@@ -5,6 +5,7 @@ import { SenderShell } from '@/features/sender/components';
 import { prepareVenueSpeakerAudio, startVenueSpeaker, type PreparedVenueSpeakerAudio, type VenueSession, type VenueSessionMetrics, type VenueTransport } from './venueAudio';
 import { metricsValues, VenueRunControls } from './VenueMicPage';
 import { holdWakeLock } from '@/lib/ivs/wakeLock';
+import { recordClientDiagnostic } from '@/lib/diagnostics';
 import {
   appendVenueRunRecord,
   createVenueRun,
@@ -17,9 +18,10 @@ function nowUtc() { return new Date().toISOString(); }
 function newRunId() { return typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`; }
 function errorMessage(reason: unknown) {
   if (reason instanceof DOMException && reason.name === 'NotAllowedError')
-    return '音声再生がブラウザにブロックされました。iPhone/iPad ではこの開始ボタンから再試行し、無音の場合はブラウザの自動再生設定と端末の消音スイッチを確認してください。';
-  return reason instanceof Error ? reason.message : 'スピーカー接続に失敗しました。同じ LAN の接続を確認してください。';
+    return '音声再生がブラウザにブロックされました。iPhone/iPad ではこの開始ボタンから再試行し、無音の場合は端末の消音モードを解除してください。';
+  return reason instanceof Error ? reason.message : 'スピーカー接続に失敗しました。診断ログとネットワーク接続を確認してください。';
 }
+function isAbortError(reason: unknown) { return reason instanceof DOMException && reason.name === 'AbortError' || reason instanceof Error && reason.name === 'AbortError'; }
 function record<T extends VenueRunRecord>(type: T['type'], id: string, elapsedMs: number, fields: Omit<T, 'type' | 'id' | 'atUtc' | 'elapsedMs'>): T {
   return { type, id, atUtc: nowUtc(), elapsedMs, ...fields } as T;
 }
@@ -28,8 +30,7 @@ export default function VenueSpeakerPage() {
   const [status, setStatus] = useState('停止');
   const [error, setError] = useState<string | null>(null);
   const [slotChoice, setSlotChoice] = useState<SlotChoice>('auto');
-  const [transport, setTransport] = useState<VenueTransport>('pcm');
-  const [runTransport, setRunTransport] = useState<VenueTransport>('pcm');
+  const transport: VenueTransport = 'pcm';
   const [ownSlot, setOwnSlot] = useState<number | null>(null);
   const [metrics, setMetrics] = useState<VenueSessionMetrics | null>(null);
   const [runIdValue, setRunIdValue] = useState<string | null>(null);
@@ -49,7 +50,7 @@ export default function VenueSpeakerPage() {
       const elapsedMs = performance.now() - startMono.current;
       writeQueue.current = writeQueue.current
         .then(() => appendVenueRunRecord(id, record('transport', `unmount-${Date.now()}`, elapsedMs, { event: 'stop', detail: 'page-unmount' })))
-        .then(() => endVenueRun(id, nowUtc())).catch(() => undefined);
+        .then(() => endVenueRun(id, nowUtc())).catch((reason) => { recordClientDiagnostic(reason, 'venue.run-log.end', { phase: 'unmount', side: 'speaker', runId: id }); });
     }
   }, []);
   useEffect(() => status === '停止' || status === 'エラー' ? undefined : holdWakeLock(), [status]);
@@ -58,6 +59,7 @@ export default function VenueSpeakerPage() {
     const id = runRef.current;
     if (!id) return;
     writeQueue.current = writeQueue.current.then(() => appendVenueRunRecord(id, item)).then(() => undefined).catch((reason) => {
+      recordClientDiagnostic(reason, 'venue.run-log.write', { runId: id, recordType: item.type });
       setError(`計測ログを保存できませんでした: ${reason instanceof Error ? reason.message : 'IndexedDB error'}`);
     });
   };
@@ -71,6 +73,7 @@ export default function VenueSpeakerPage() {
       addEvent('stop');
       const id = runRef.current;
       writeQueue.current = writeQueue.current.then(() => endVenueRun(id, nowUtc())).then(() => undefined).catch((reason) => {
+        recordClientDiagnostic(reason, 'venue.run-log.end', { phase: 'stop', side: 'speaker', runId: id });
         setError(`ランを終了保存できませんでした: ${reason instanceof Error ? reason.message : 'IndexedDB error'}`);
       });
       runRef.current = null;
@@ -108,7 +111,6 @@ export default function VenueSpeakerPage() {
       await createVenueRun({ id, startedAtUtc: nowUtc(), userAgent: navigator.userAgent, peers: [`config.transport=${transport}`] });
       runRef.current = id;
       setRunIdValue(id);
-      setRunTransport(transport);
       setActive(true);
       startMono.current = performance.now();
       addEvent('start', `transport=${transport}`);
@@ -131,11 +133,22 @@ export default function VenueSpeakerPage() {
       });
     } catch (reason) {
       void audio.context.close();
+      if (isAbortError(reason)) {
+        if (runRef.current) {
+          const endedRun = runRef.current;
+          runRef.current = null;
+          await endVenueRun(endedRun, nowUtc()).catch((cleanupError) => recordClientDiagnostic(cleanupError, 'venue.run-log.end', { phase: 'cancel-start', side: 'speaker', runId: endedRun }));
+        }
+        setStatus('停止');
+        setActive(false);
+        return;
+      }
       const message = errorMessage(reason);
+      recordClientDiagnostic(reason, 'venue.session', { phase: 'start', side: 'speaker', transport, slot: slotChoice === 'auto' ? null : slotChoice });
       if (runRef.current) {
         write(record('error', `error-${Date.now()}`, performance.now() - startMono.current, { code: 'start', message }));
         const endedRun = runRef.current;
-        writeQueue.current = writeQueue.current.then(() => endVenueRun(endedRun, nowUtc())).then(() => undefined).catch(() => undefined);
+        writeQueue.current = writeQueue.current.then(() => endVenueRun(endedRun, nowUtc())).then(() => undefined).catch((cleanupError) => { recordClientDiagnostic(cleanupError, 'venue.run-log.end', { phase: 'failed-start', side: 'speaker', runId: endedRun }); });
         runRef.current = null;
       }
       setError(message);
@@ -146,7 +159,7 @@ export default function VenueSpeakerPage() {
     }
   };
 
-  return <SenderShell title="会場音声 PoC: スピーカー" description="DataChannel 音声をローカル再生します。ログはこの端末の IndexedDB に保存します。" status={<span>{status}</span>}>
+  return <SenderShell title="会場スピーカー" description="マイク送信ページから届く音声を DataChannel PCM で再生します。" status={<span>{status}</span>}>
     <p role="status" className="text-sm">状態: {status}</p>
     {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
     <label className="block space-y-1 text-sm">スピーカースロット
@@ -155,20 +168,15 @@ export default function VenueSpeakerPage() {
         {[1, 2, 3, 4, 5].map((slot) => <option key={slot} value={slot}>SPK{slot}</option>)}
       </select>
     </label>
-    <label className="block space-y-1 text-sm">音声方式
-      <select aria-label="音声方式" className="block h-10 w-full rounded border bg-background px-2" value={transport} disabled={active} onChange={(e) => setTransport(e.target.value as VenueTransport)}>
-        <option value="pcm">DataChannel PCM</option><option value="audio-track">WebRTC 音声トラック</option>
-      </select>
-    </label>
     {ownSlot !== null && <p className="text-sm">自分のスロット: SPK{ownSlot}</p>}
     {metrics && <section aria-label="接続メトリクス" className="space-y-1 text-sm">
       <p>ピア接続: {metrics.connectedPeers}/{metrics.activePeers}</p>
       <p>診断 RTT: {metrics.rttMs === null ? '未計測' : `${metrics.rttMs.toFixed(1)} ms`}（ネットワーク往復時間。片道音声遅延ではありません）</p>
-      <ul>{metrics.peers.map((peer) => <li key={peer.peerId}>{peer.side === 'mic' ? 'MIC' : 'SPK'}{peer.slot}: {peer.connected ? '接続済み' : peer.state}</li>)}</ul>
+      <ul>{metrics.peers.map((peer) => <li key={peer.peerId}>{peer.side === 'mic' ? 'MIC' : 'SPK'}{peer.slot}: {peer.connected ? '接続済み' : peer.state} / ICE {peer.iceState} / SDP {peer.signalingState}</li>)}</ul>
       {metrics.workletStreams.map((stream) => <p key={stream.micId}>{stream.micId}: {stream.queuedMs} ms queued / underflow {stream.underflows} / overflow {stream.overflows}</p>)}
     </section>}
     {!active ? <Button className="h-11 w-full" onClick={() => void start(prepareVenueSpeakerAudio())}><MonitorPlay aria-hidden />受信開始</Button> : <Button variant="outline" className="h-11 w-full" onClick={stop}><Square aria-hidden />停止</Button>}
-    <p className="text-sm text-muted-foreground">開始ボタンを押すと音声再生を有効化します。iPhone/iPad で無音の場合は自動再生設定と端末の消音スイッチを確認し、停止して再度開始してください。診断 RTT は片道音声遅延ではありません。</p>
-    <VenueRunControls runId={runIdValue} slot={ownSlot} metrics={metrics} onFailure={setError} side="speaker" transport={runTransport} />
+    <p className="text-sm text-muted-foreground">開始ボタンを押すと音声再生を有効化します。iPhone/iPad では消音モードを解除してください。音量は端末の音量ボタンで調整します。診断 RTT は片道音声遅延ではありません。</p>
+    <VenueRunControls runId={runIdValue} slot={ownSlot} metrics={metrics} onFailure={setError} side="speaker" transport={transport} />
   </SenderShell>;
 }

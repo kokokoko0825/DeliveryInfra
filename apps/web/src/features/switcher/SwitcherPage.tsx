@@ -17,6 +17,8 @@ import { cameraSlots, slideAlert } from './engine/sources';
 import { onAirSources } from './engine/state';
 import { createDefaultStandby, loadStandbyImage } from './media/compositor';
 import { useSwitcher } from './useSwitcher';
+import { ApiError } from '@/lib/api';
+import { recordClientDiagnostic } from '@/lib/diagnostics';
 
 const STAGE_LABEL = { production: '制作用', slide: 'スライド用', broadcast: '配信用' } as const;
 const STATUS_LABEL = { idle: '未接続', connecting: '接続中', connected: '接続済み', reconnecting: '再接続中' } as const;
@@ -68,6 +70,7 @@ export default function SwitcherPage() {
       setStandbyUrl(image.src);
       setStandbyError(null);
     } catch (error) {
+      recordClientDiagnostic(error, 'switcher.standby.load');
       setStandbyError(error instanceof Error ? error.message : '画像を読み込めませんでした');
     }
   };
@@ -80,6 +83,7 @@ export default function SwitcherPage() {
       setStartError(null);
       await controller.start();
     } catch (error) {
+      if (!(error instanceof ApiError)) recordClientDiagnostic(error, 'switcher.start');
       setStartError(error instanceof Error ? error.message : 'スイッチャーを起動できませんでした');
     }
   };

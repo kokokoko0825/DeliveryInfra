@@ -2,8 +2,24 @@ import { Amplify } from 'aws-amplify';
 import { confirmResetPassword, confirmSignIn, confirmSignUp, fetchAuthSession, resetPassword, signIn, signInWithRedirect, signOut, signUp } from 'aws-amplify/auth';
 import 'aws-amplify/auth/enable-oauth-listener';
 import type { RuntimeConfig } from './config';
+import { recordClientDiagnostic } from './diagnostics';
 
 export type SignInResult = 'DONE' | 'NEW_PASSWORD_REQUIRED' | 'RESET_PASSWORD';
+
+const EXPECTED_AUTH_FAILURES = new Set([
+  'CodeMismatchException', 'ExpiredCodeException', 'InvalidPasswordException', 'LimitExceededException',
+  'NotAuthorizedException', 'PasswordResetRequiredException', 'TooManyRequestsException', 'UserAlreadyAuthenticatedException',
+  'UserNotConfirmedException', 'UserNotFoundException', 'UsernameExistsException',
+]);
+
+async function captureAuthFailure<T>(source: string, operation: () => Promise<T>): Promise<T> {
+  try { return await operation(); }
+  catch (error) {
+    const name = error instanceof Error ? error.name : '';
+    recordClientDiagnostic(error, source, EXPECTED_AUTH_FAILURES.has(name) ? { status: 400 } : undefined);
+    throw error;
+  }
+}
 
 export function configureAuth(config: RuntimeConfig) {
   Amplify.configure({
@@ -35,35 +51,40 @@ export function toSignInResult(step: string): SignInResult {
 }
 
 export async function loginWithEmail(email: string, password: string): Promise<SignInResult> {
-  const { nextStep } = await signIn({ username: email, password });
-  return toSignInResult(nextStep.signInStep);
+  return captureAuthFailure('auth.login', async () => {
+    const { nextStep } = await signIn({ username: email, password });
+    return toSignInResult(nextStep.signInStep);
+  });
 }
 
 export async function registerWithEmail(email: string, password: string): Promise<void> {
-  await signUp({ username: email, password, options: { userAttributes: { email } } });
+  await captureAuthFailure('auth.signup', () => signUp({ username: email, password, options: { userAttributes: { email } } }));
 }
 
 export async function confirmEmailRegistration(email: string, confirmationCode: string): Promise<void> {
-  await confirmSignUp({ username: email, confirmationCode });
+  await captureAuthFailure('auth.signup.confirm', () => confirmSignUp({ username: email, confirmationCode }));
 }
 
 export async function completeNewPassword(newPassword: string): Promise<SignInResult> {
-  const { nextStep } = await confirmSignIn({ challengeResponse: newPassword });
-  return toSignInResult(nextStep.signInStep);
+  return captureAuthFailure('auth.password.new', async () => {
+    const { nextStep } = await confirmSignIn({ challengeResponse: newPassword });
+    return toSignInResult(nextStep.signInStep);
+  });
 }
 
-export const loginWithOkta = (providerName: string) => signInWithRedirect({ provider: { custom: providerName } });
-export const requestPasswordReset = async (email: string) => { await resetPassword({ username: email }); };
+export const loginWithOkta = (providerName: string) => captureAuthFailure('auth.login.redirect', () => signInWithRedirect({ provider: { custom: providerName } }));
+export const requestPasswordReset = async (email: string) => { await captureAuthFailure('auth.password.reset.request', () => resetPassword({ username: email })); };
 export const confirmPasswordReset = (email: string, confirmationCode: string, newPassword: string) =>
-  confirmResetPassword({ username: email, confirmationCode, newPassword });
-export const logout = () => signOut();
+  captureAuthFailure('auth.password.reset.confirm', () => confirmResetPassword({ username: email, confirmationCode, newPassword }));
+export const logout = () => captureAuthFailure('auth.logout', () => signOut());
 
 /** 期限切れなら Amplify がリフレッシュトークンで自動更新する。forceRefresh で強制更新。 */
 export async function getAccessToken(forceRefresh = false): Promise<string | undefined> {
   try {
     const session = await fetchAuthSession({ forceRefresh });
     return session.tokens?.accessToken.toString();
-  } catch {
+  } catch (error) {
+    recordClientDiagnostic(error, 'auth.token');
     return undefined;
   }
 }

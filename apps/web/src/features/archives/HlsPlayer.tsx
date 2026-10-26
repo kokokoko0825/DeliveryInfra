@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Hls from 'hls.js';
 import { ErrorText } from '@/components/app/StatusView';
+import { recordClientDiagnostic } from '@/lib/diagnostics';
 
 /** Safari はネイティブ HLS、それ以外は hls.js で再生する。 */
 export function canPlayNativeHls(video: HTMLVideoElement): boolean {
@@ -39,7 +40,10 @@ export function HlsPlayer({ src, title, refreshCookies }: { src: string; title: 
       recoveries += 1;
       refresh.current()
         .then(() => { if (!disposed) resume(); })
-        .catch(() => { if (!disposed) setError(FAILED); });
+        .catch((error) => {
+          recordClientDiagnostic(error, 'archive.playback.cookie-refresh');
+          if (!disposed) setError(FAILED);
+        });
     };
 
     if (canPlayNativeHls(video)) {
@@ -77,6 +81,7 @@ export function HlsPlayer({ src, title, refreshCookies }: { src: string; title: 
     const hls = new Hls({ xhrSetup: (xhr) => { xhr.withCredentials = true; } });
     hls.on(Hls.Events.ERROR, (_event, data) => {
       if (!data.fatal) return;
+      recordClientDiagnostic(new Error(`HLS fatal error: ${data.details}`), 'archive.playback.hls', { type: data.type, details: data.details, fatal: data.fatal });
       // 4xx（Cookie 失効の 403 など）は hls.js が再試行しない。取り直して現在位置から読み込みを再開する
       if (data.type === Hls.ErrorTypes.NETWORK_ERROR) recover(() => hls.startLoad(video.currentTime));
       else setError(FAILED);

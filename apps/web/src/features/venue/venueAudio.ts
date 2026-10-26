@@ -1,5 +1,6 @@
 import { ApiError, apiFetch } from '@/lib/api';
 import venuePcmWorkletUrl from './venue-pcm.worklet.js?url&no-inline';
+import { recordClientDiagnostic } from '@/lib/diagnostics';
 
 type Signal = { type: 'offer' | 'answer'; sdp: string };
 type Side = 'mic' | 'speaker';
@@ -16,6 +17,9 @@ export type VenuePeerMetrics = Readonly<{
   speakerSlot: number;
   active: boolean;
   state: RTCPeerConnectionState;
+  iceState: RTCIceConnectionState;
+  iceGatheringState: RTCIceGatheringState;
+  signalingState: RTCSignalingState;
   connected: boolean;
   sentPackets: number;
   sentBytes: number;
@@ -60,7 +64,7 @@ type PeerCounters = {
   receivedPackets: number; receivedPcmBytes: number; sequenceGaps: number; duplicates: number; invalidPackets: number;
   rttMs: number | null; highestSequence: number; seenSequences: Set<number>;
 };
-type Link = { peer: RTCPeerConnection; remoteParticipantId: string; micSlot: number; speakerSlot: number; channel?: RTCDataChannel; disconnectTimer: ReturnType<typeof setTimeout> | undefined; metrics: PeerCounters };
+type Link = { peer: RTCPeerConnection; remoteParticipantId: string; micSlot: number; speakerSlot: number; channel?: RTCDataChannel; disconnectTimer: ReturnType<typeof setTimeout> | undefined; connectTimer: ReturnType<typeof setTimeout> | undefined; metrics: PeerCounters };
 type AudioController = {
   close: () => void;
   onPcm?: (micId: string, sequence: number, timestamp: number, data: ArrayBuffer) => void;
@@ -69,7 +73,15 @@ type AudioController = {
   onTrack?: (track: MediaStreamTrack, streams: readonly MediaStream[]) => (() => void) | undefined;
 };
 
-const ROOM_ID = 'venue-poc';
+function reportDataChannelFailure(error: unknown, phase: string, role: Side, transport: VenueTransport, link: Link) {
+  recordClientDiagnostic(error, 'venue.data-channel', {
+    phase, role, transport, peerId: `${link.micSlot}:${link.speakerSlot}`,
+    micSlot: link.micSlot, speakerSlot: link.speakerSlot,
+    readyState: link.channel?.readyState ?? null, bufferedAmount: link.channel?.bufferedAmount ?? null,
+  });
+}
+
+const ROOM_ID = 'venue-live';
 const ICE_SERVERS: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
 const DISCOVERY_INTERVAL_MS = 750;
 const SIGNAL_INTERVAL_MS = 300;
@@ -77,9 +89,11 @@ const MAX_SIGNAL_POLLS = 300;
 const LEASE_RENEW_INTERVAL_MS = 120_000;
 const PCM_HEADER_BYTES = 20;
 const PCM_BYTES = 960;
+const MAX_BUFFERED_PCM_BYTES = (PCM_HEADER_BYTES + PCM_BYTES) * 4;
 const MAX_SEQUENCE_HISTORY = 256;
 const PCM_MAGIC = [0x56, 0x50, 0x43, 0x4d]; // VPCM
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const isAbortError = (error: unknown) => error instanceof DOMException && error.name === 'AbortError' || error instanceof Error && error.name === 'AbortError';
 const roomPath = (roomId: string) => `/venue-speaker/rooms/${encodeURIComponent(roomId)}`;
 const pairPath = (kind: 'offers' | 'answers', micSlot: number, speakerSlot: number) => `${kind}/${micSlot}/${speakerSlot}`;
 const signalSchema = { parse: (value: unknown) => {
@@ -117,15 +131,15 @@ async function registerParticipant(side: Side, options: ParticipantOptions): Pro
 }
 
 function waitIce(peer: RTCPeerConnection) {
-  if (peer.iceGatheringState === 'complete') return Promise.resolve();
-  return new Promise<void>((resolve) => {
-    const done = () => {
+  if (peer.iceGatheringState === 'complete') return Promise.resolve(false);
+  return new Promise<boolean>((resolve) => {
+    const done = (timedOut: boolean) => {
       peer.removeEventListener('icegatheringstatechange', check);
       clearTimeout(timeout);
-      resolve();
+      resolve(timedOut);
     };
-    const check = () => { if (peer.iceGatheringState === 'complete') done(); };
-    const timeout = setTimeout(done, 8000);
+    const check = () => { if (peer.iceGatheringState === 'complete') done(false); };
+    const timeout = setTimeout(() => done(true), 8000);
     peer.addEventListener('icegatheringstatechange', check);
   });
 }
@@ -174,15 +188,19 @@ function decodePcmPacket(data: ArrayBuffer, micSlot: number) {
   return { sequence, timestamp, pcm: data.slice(PCM_HEADER_BYTES) };
 }
 
-function startPings(channel: RTCDataChannel, onRtt: (value: number) => void) {
+function startPings(channel: RTCDataChannel, onRtt: (value: number) => void, onSendFailure: (error: unknown, phase: string) => void) {
   const interval = setInterval(() => {
-    if (channel.readyState === 'open') channel.send(JSON.stringify({ kind: 'ping', at: performance.now() }));
+    if (channel.readyState === 'open') {
+      try { channel.send(JSON.stringify({ kind: 'ping', at: performance.now() })); }
+      catch (error) { onSendFailure(error, 'control-ping'); }
+    }
   }, 1000);
   channel.onmessage = ({ data }) => {
     const message = readControlMessage(data);
     if (!message) return;
     if (message.kind === 'ping' && message.at !== undefined && channel.readyState === 'open') {
-      channel.send(JSON.stringify({ kind: 'pong', at: message.at }));
+      try { channel.send(JSON.stringify({ kind: 'pong', at: message.at })); }
+      catch (error) { onSendFailure(error, 'control-pong'); }
     } else if (message.kind === 'pong' && message.at !== undefined) {
       onRtt(performance.now() - message.at);
     }
@@ -206,6 +224,8 @@ function createSession(
   const links = new Map<string, Link>();
   const peerHistory = new Map<string, PeerCounters>();
   const peerParticipantIds = new Map<string, string>();
+  const retryAfter = new Map<string, number>();
+  const retryCounts = new Map<string, number>();
   const pingCleanups = new Map<RTCDataChannel, () => void>();
   const trackCleanups = new Map<string, Array<() => void>>();
   let closed = false;
@@ -223,6 +243,7 @@ function createSession(
     if (links.get(key) !== link) return;
     links.delete(key);
     if (link.disconnectTimer) clearTimeout(link.disconnectTimer);
+    if (link.connectTimer) clearTimeout(link.connectTimer);
     for (const cleanup of trackCleanups.get(key) ?? []) cleanup();
     trackCleanups.delete(key);
     if (link.channel) {
@@ -232,10 +253,6 @@ function createSession(
     }
     link.metrics.rttMs = null;
     link.peer.close();
-    if (!closed && !connectedSettled && links.size === 0) {
-      connectedSettled = true;
-      connectedReject(new Error('WebRTC 接続に失敗しました。Wi-Fi の端末間通信を確認してください'));
-    }
   };
 
   const connectPair = (remote: Participant) => {
@@ -251,9 +268,46 @@ function createSession(
       metrics.seenSequences.clear();
     }
     peerParticipantIds.set(key, remote.participantId);
-    const link: Link = { peer: new RTCPeerConnection({ iceServers: ICE_SERVERS }), remoteParticipantId: remote.participantId, micSlot: mic.slot, speakerSlot: speaker.slot, disconnectTimer: undefined, metrics };
+    const link: Link = { peer: new RTCPeerConnection({ iceServers: ICE_SERVERS }), remoteParticipantId: remote.participantId, micSlot: mic.slot, speakerSlot: speaker.slot, disconnectTimer: undefined, connectTimer: undefined, metrics };
     links.set(key, link);
     const peer = link.peer;
+    const reportChannelSendFailure = (error: unknown, phase: string) => reportDataChannelFailure(error, phase, side, transport, link);
+    const peerContext = (phase: string) => ({
+      phase, role: side, transport, peerId: key, micSlot: mic.slot, speakerSlot: speaker.slot,
+      connectionState: peer.connectionState, iceConnectionState: peer.iceConnectionState,
+      iceGatheringState: peer.iceGatheringState, signalingState: peer.signalingState,
+      retryAttempt: retryCounts.get(key) ?? 0,
+    });
+    const reportPeerFailure = (phase: string, error: unknown) => {
+      const context = peerContext(phase);
+      if (typeof peer.getStats !== 'function') {
+        recordClientDiagnostic(error, 'venue.peer', context);
+        return;
+      }
+      void peer.getStats().then((stats) => {
+        const reports = [...stats.values()];
+        const pair = reports.map((stat) => stat as RTCIceCandidatePairStats).find((stat) => stat.type === 'candidate-pair' && stat.nominated && stat.state === 'succeeded');
+        const local = pair ? stats.get(pair.localCandidateId) as (RTCStats & { candidateType?: string }) | undefined : undefined;
+        const remoteCandidate = pair ? stats.get(pair.remoteCandidateId) as (RTCStats & { candidateType?: string }) | undefined : undefined;
+        recordClientDiagnostic(error, 'venue.peer', {
+          ...context,
+          candidatePairState: pair?.state ?? null,
+          localCandidateType: local?.candidateType ?? null,
+          remoteCandidateType: remoteCandidate?.candidateType ?? null,
+        });
+      }).catch(() => recordClientDiagnostic(error, 'venue.peer', context));
+    };
+    const delayRetry = () => {
+      const count = (retryCounts.get(key) ?? 0) + 1;
+      retryCounts.set(key, count);
+      retryAfter.set(key, Date.now() + Math.min(30_000, 1_000 * (2 ** Math.min(count - 1, 5))));
+    };
+    link.connectTimer = setTimeout(() => {
+      if (peer.connectionState === 'connected' || links.get(key) !== link) return;
+      delayRetry();
+      reportPeerFailure('connection-timeout', new Error('WebRTC peer did not connect within 30 seconds'));
+      closeLink(key, link);
+    }, 30_000);
     peer.ontrack = ({ track, streams }) => {
       const cleanup = audio.onTrack?.(track, streams);
       if (cleanup) trackCleanups.set(key, [...(trackCleanups.get(key) ?? []), cleanup]);
@@ -261,15 +315,29 @@ function createSession(
     peer.onconnectionstatechange = () => {
       if (peer.connectionState === 'connected') {
         if (link.disconnectTimer) clearTimeout(link.disconnectTimer);
+        if (link.connectTimer) clearTimeout(link.connectTimer);
+        link.connectTimer = undefined;
         link.disconnectTimer = undefined;
+        retryAfter.delete(key);
+        retryCounts.delete(key);
         if (!connectedSettled) { connectedSettled = true; connectedResolve(); }
       } else if (peer.connectionState === 'failed' || peer.connectionState === 'closed') {
+        if (peer.connectionState === 'failed') {
+          delayRetry();
+          reportPeerFailure('connection-failed', new Error(`WebRTC connection failed for ${key}`));
+        }
         closeLink(key, link);
       } else if (peer.connectionState === 'disconnected' && !link.disconnectTimer) {
         link.disconnectTimer = setTimeout(() => {
           if (peer.connectionState === 'disconnected') closeLink(key, link);
         }, 3000);
       }
+    };
+    peer.onicecandidateerror = (event) => {
+      recordClientDiagnostic(new Error(event.errorText || 'ICE server candidate gathering failed'), 'venue.ice-candidate', {
+        role: side, transport, peerId: key, micSlot: mic.slot, speakerSlot: speaker.slot,
+        errorCode: event.errorCode, url: event.url, iceGatheringState: peer.iceGatheringState,
+      });
     };
 
     if (side === 'mic') {
@@ -280,12 +348,13 @@ function createSession(
         ? peer.createDataChannel('pcm', { ordered: false, maxRetransmits: 0 })
         : peer.createDataChannel('control');
       link.channel = channel;
-      pingCleanups.set(channel, startPings(channel, (value) => updateRtt(link, value)));
+      pingCleanups.set(channel, startPings(channel, (value) => updateRtt(link, value), reportChannelSendFailure));
       void (async () => {
         try {
           const offer = await peer.createOffer();
           await peer.setLocalDescription(offer);
-          await waitIce(peer);
+          const iceTimedOut = await waitIce(peer);
+          if (iceTimedOut) recordClientDiagnostic(new Error('ICE candidate gathering timed out after 8 seconds'), 'venue.ice-gathering', peerContext('offer'));
           if (closed || peer.signalingState === 'closed') return;
           const local = peer.localDescription;
           if (!local?.sdp) throw new Error('WebRTC offer を作成できませんでした');
@@ -294,7 +363,10 @@ function createSession(
           await sleep(DISCOVERY_INTERVAL_MS * 2);
           const answer = await pollSignal(roomId, pairPath('answers', mic.slot, speaker.slot), peer, () => closed || links.get(key) !== link);
           await peer.setRemoteDescription(answer);
-        } catch {
+        } catch (error) {
+          if (closed || links.get(key) !== link || isAbortError(error)) return;
+          delayRetry();
+          reportPeerFailure('offer', error);
           closeLink(key, link);
         }
       })();
@@ -302,7 +374,7 @@ function createSession(
       peer.ondatachannel = ({ channel }) => {
         channel.binaryType = 'arraybuffer';
         link.channel = channel;
-        pingCleanups.set(channel, startPings(channel, (value) => updateRtt(link, value)));
+        pingCleanups.set(channel, startPings(channel, (value) => updateRtt(link, value), reportChannelSendFailure));
         if (transport === 'audio-track') return;
         channel.onmessage = ({ data }) => {
           if (data instanceof ArrayBuffer) {
@@ -330,7 +402,10 @@ function createSession(
           }
           const message = readControlMessage(data);
           if (!message) return;
-          if (message.kind === 'ping' && message.at !== undefined && channel.readyState === 'open') channel.send(JSON.stringify({ kind: 'pong', at: message.at }));
+          if (message.kind === 'ping' && message.at !== undefined && channel.readyState === 'open') {
+            try { channel.send(JSON.stringify({ kind: 'pong', at: message.at })); }
+            catch (error) { reportChannelSendFailure(error, 'control-pong'); }
+          }
           else if (message.kind === 'pong' && message.at !== undefined) updateRtt(link, performance.now() - message.at);
         };
       };
@@ -340,7 +415,8 @@ function createSession(
           await peer.setRemoteDescription(offer);
           const answer = await peer.createAnswer();
           await peer.setLocalDescription(answer);
-          await waitIce(peer);
+          const iceTimedOut = await waitIce(peer);
+          if (iceTimedOut) recordClientDiagnostic(new Error('ICE candidate gathering timed out after 8 seconds'), 'venue.ice-gathering', peerContext('answer'));
           if (closed || peer.signalingState === 'closed') return;
           const local = peer.localDescription;
           if (!local?.sdp) throw new Error('WebRTC answer を作成できませんでした');
@@ -354,7 +430,10 @@ function createSession(
               break;
             }
           }
-        } catch {
+        } catch (error) {
+          if (closed || links.get(key) !== link || isAbortError(error)) return;
+          delayRetry();
+          reportPeerFailure('answer', error);
           closeLink(key, link);
         }
       })();
@@ -384,9 +463,11 @@ function createSession(
         const speakerSlot = side === 'speaker' ? registration.slot : remote.slot;
         const key = `${micSlot}:${speakerSlot}`;
         const current = links.get(key);
+        if (retryAfter.get(key) && retryAfter.get(key)! > Date.now()) continue;
         if (!current || current.remoteParticipantId !== remote.participantId) connectPair(remote);
       }
-    } catch {
+    } catch (error) {
+      if (!closed && !isAbortError(error)) recordClientDiagnostic(error, 'venue.discovery', { phase: 'participant-poll', role: side, transport, slot: registration.slot });
       // A failed discovery poll is transient; the next interval retries.
     }
   };
@@ -396,7 +477,7 @@ function createSession(
     sentPcmBytes += data.byteLength - PCM_HEADER_BYTES;
     for (const link of links.values()) {
       if (link.channel?.readyState !== 'open') continue;
-      if (link.channel.bufferedAmount >= 64_000) {
+      if (link.channel.bufferedAmount >= MAX_BUFFERED_PCM_BYTES) {
         link.metrics.bufferedAmountDrops++;
         continue;
       }
@@ -404,8 +485,8 @@ function createSession(
         link.channel.send(data);
         link.metrics.sentPackets++;
         link.metrics.sentPcmBytes += data.byteLength - PCM_HEADER_BYTES;
-      } catch {
-        link.metrics.bufferedAmountDrops++;
+      } catch (error) {
+        reportDataChannelFailure(error, 'send-exception', side, transport, link);
       }
     }
   });
@@ -413,6 +494,7 @@ function createSession(
   const renewal = setInterval(() => {
     void apiFetch(`${roomPath(roomId)}/participants/${registration.participantId}`, { method: 'PATCH' }).catch((error) => {
       if (error instanceof ApiError && error.status === 404) close();
+      else if (!closed && !isAbortError(error)) recordClientDiagnostic(error, 'venue.lease', { phase: 'renewal', role: side, transport, slot: registration.slot, status: error instanceof ApiError ? error.status : null });
     });
   }, LEASE_RENEW_INTERVAL_MS);
   void discover();
@@ -443,6 +525,9 @@ function createSession(
         speakerSlot: link?.speakerSlot ?? speakerSlot!,
         active: Boolean(link),
         state: link?.peer.connectionState ?? 'closed' as RTCPeerConnectionState,
+        iceState: link?.peer.iceConnectionState ?? 'closed' as RTCIceConnectionState,
+        iceGatheringState: link?.peer.iceGatheringState ?? 'complete' as RTCIceGatheringState,
+        signalingState: link?.peer.signalingState ?? 'closed' as RTCSignalingState,
         connected: link?.peer.connectionState === 'connected',
         sentPackets: metrics.sentPackets,
         sentBytes: metrics.sentPcmBytes,
@@ -486,6 +571,7 @@ export type VenueMicOptions = TransportOptions;
 export type VenueSpeakerOptions = TransportOptions;
 
 export type PreparedVenueSpeakerAudio = { context: AudioContext; ready: Promise<void> };
+export type PreparedVenueMicAudio = { context: AudioContext; ready: Promise<void> };
 
 /** Call synchronously from the speaker's user-gesture handler to unlock iOS Web Audio. */
 export function prepareVenueSpeakerAudio(): PreparedVenueSpeakerAudio {
@@ -493,21 +579,34 @@ export function prepareVenueSpeakerAudio(): PreparedVenueSpeakerAudio {
   return { context, ready: context.resume() };
 }
 
-export async function startVenueMic(stream: MediaStream, options: VenueMicOptions = {}): Promise<VenueSession> {
+/** Call synchronously from the mic toggle's user gesture so iOS starts the PCM worklet before API waits. */
+export function prepareVenueMicAudio(): PreparedVenueMicAudio {
+  const context = new AudioContext({ latencyHint: 'interactive', sampleRate: 48000 });
+  const ready = context.resume();
+  ready.catch(() => undefined);
+  return { context, ready };
+}
+
+export async function startVenueMic(stream: MediaStream, options: VenueMicOptions = {}, preparedAudio?: PreparedVenueMicAudio): Promise<VenueSession> {
   const roomId = options.roomId ?? ROOM_ID;
   const transport = options.transport ?? 'pcm';
-  const registration = await registerParticipant('mic', options);
-  let context: AudioContext | undefined;
+  let registration: Registration | undefined;
+  let context: AudioContext | undefined = preparedAudio?.context;
   let source: MediaStreamAudioSourceNode | undefined;
   let processor: AudioWorkletNode | undefined;
   let silent: GainNode | undefined;
   let sendPcm: (data: ArrayBuffer) => void = () => undefined;
   let sequence = 0;
   try {
+    if (preparedAudio) await preparedAudio.ready;
+    const registered = await registerParticipant('mic', options);
+    registration = registered;
     if (transport === 'audio-track') {
-      return createSession('mic', registration, roomId, () => undefined, () => ({ close: () => undefined }), transport, stream);
+      await context?.close();
+      return createSession('mic', registered, roomId, () => undefined, () => ({ close: () => undefined }), transport, stream);
     }
-    context = new AudioContext({ latencyHint: 'interactive', sampleRate: 48000 });
+    context ??= new AudioContext({ latencyHint: 'interactive', sampleRate: 48000 });
+    if (context.state !== 'running') await context.resume();
     await context.audioWorklet.addModule(venuePcmWorkletUrl);
     processor = new AudioWorkletNode(context, 'venue-pcm', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
     source = context.createMediaStreamSource(stream);
@@ -517,14 +616,15 @@ export async function startVenueMic(stream: MediaStream, options: VenueMicOption
     processor.connect(silent);
     silent.connect(context.destination);
     processor.port.onmessage = ({ data }) => {
-      if (data instanceof ArrayBuffer) sendPcm(encodePcmPacket(registration.slot, sequence++, performance.now(), data));
+      if (data instanceof ArrayBuffer) sendPcm(encodePcmPacket(registered.slot, sequence++, performance.now(), data));
     };
   } catch (error) {
     source?.disconnect(); processor?.disconnect(); silent?.disconnect();
     if (context) void context.close();
-    void apiFetch(`${roomPath(roomId)}/participants/${registration.participantId}`, { method: 'DELETE' }).catch(() => undefined);
+    if (registration) void apiFetch(`${roomPath(roomId)}/participants/${registration.participantId}`, { method: 'DELETE' }).catch(() => undefined);
     throw error;
   }
+  if (!registration) throw new Error('マイク登録に失敗しました');
   const session = createSession('mic', registration, roomId, () => undefined, () => ({ close: () => {
     source?.disconnect(); processor?.disconnect(); silent?.disconnect();
     if (context) void context.close();

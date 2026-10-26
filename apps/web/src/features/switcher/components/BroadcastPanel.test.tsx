@@ -1,6 +1,7 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderPage } from '@/test/render';
+import { clearClientDiagnostics, listClientDiagnostics } from '@/lib/diagnostics';
 
 const api = vi.hoisted(() => ({ fetchBroadcast: vi.fn(), fetchBroadcastStats: vi.fn(), startBroadcast: vi.fn(), stopBroadcast: vi.fn() }));
 const toast = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
@@ -12,6 +13,7 @@ const live = { id: 'b-1', title: '定例会', status: 'live', startedAt: '2026-1
 
 beforeEach(() => {
   vi.clearAllMocks();
+  clearClientDiagnostics();
   api.fetchBroadcast.mockResolvedValue(null);
   api.fetchBroadcastStats.mockResolvedValue({ viewerCount: 0 });
 });
@@ -40,5 +42,6 @@ describe('BroadcastPanel start (R4-01)', () => {
     const props = await start();
     await waitFor(() => expect(props.stopPublishing).toHaveBeenCalledTimes(1));
     expect(toast.error).toHaveBeenCalledWith('処理に失敗しました');
+    expect(listClientDiagnostics()).toMatchObject([{ source: 'switcher.broadcast.start', message: '処理に失敗しました' }]);
   });
 });

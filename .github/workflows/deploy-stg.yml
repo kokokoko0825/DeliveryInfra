@@ -1,20 +1,41 @@
-name: Deploy staging to AWS
+name: Verify and deploy staging
 
 on:
   push:
     branches: [main]
-
-concurrency:
-  group: deploy-staging
-  cancel-in-progress: false
-
-permissions:
-  contents: read
-  id-token: write
+  pull_request:
+    branches: [main]
 
 jobs:
-  deploy:
+  verify:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm mutation:all
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: deploy-staging
+      cancel-in-progress: false
     env:
       AWS_REGION: ap-northeast-1
       CDK_DEFAULT_ACCOUNT: '896784231793'
@@ -30,9 +51,6 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter web test
-      - run: pnpm --filter api exec vitest run src/router.test.ts
-      - run: pnpm --filter infra test
       - run: pnpm --filter api build
       - run: pnpm --filter web build
       - uses: aws-actions/configure-aws-credentials@v4

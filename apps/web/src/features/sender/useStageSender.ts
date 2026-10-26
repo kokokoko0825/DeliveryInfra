@@ -5,6 +5,7 @@ import { createManagedSession, type ManagedSession } from '@/lib/ivs/managedSess
 import { releaseDevice, requestStageTokens, sendHeartbeat, tokenFor } from '@/lib/ivs/mediaApi';
 import type { PublishTrack } from '@/lib/ivs/stage';
 import { holdWakeLock } from '@/lib/ivs/wakeLock';
+import { recordClientDiagnostic } from '@/lib/diagnostics';
 import { classifyError, initialSenderState, isActive, senderReducer, type SenderErrorKind } from './engine/session';
 
 export const HEARTBEAT_INTERVAL_MS = 15_000;
@@ -54,7 +55,11 @@ export function useStageSender(purpose: SenderPurpose) {
     const session = managed.current;
     heartbeat.current = setInterval(() => {
       sendHeartbeat(id).catch((error: unknown) => {
-        if (!(error instanceof ApiError)) return;
+        if (!(error instanceof ApiError)) {
+          recordClientDiagnostic(error, 'stage.sender.heartbeat', { purpose });
+          return;
+        }
+        if (error.code !== 'DEVICE_REPLACED') recordClientDiagnostic(error, 'stage.sender.heartbeat', { purpose, code: error.code, status: error.status, requestId: error.requestId ?? null });
         // 同じ端末名の別端末に引き継がれていたら止める。取り直すと相手を切断し合うため
         if (error.code === 'DEVICE_REPLACED') fail(session, 'replaced');
         // 枠が失効していたら取り直す
@@ -105,6 +110,7 @@ export function useStageSender(purpose: SenderPurpose) {
       await session.start();
     } catch (error) {
       // 初回の失敗（台数上限・権限など）は自動再試行せずに表示する
+      recordClientDiagnostic(error, 'stage.sender.start', { purpose, kind: classifyError(error) });
       session.stop();
       stopHeartbeat();
       void release();

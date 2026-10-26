@@ -5,6 +5,7 @@ import { ApiError, apiFetch, errorMessage, setTokenProvider, setUnauthorizedHand
 import { configureAuth, getAccessToken, logout as amplifyLogout, redirectErrorMessage } from '@/lib/auth';
 import { loadRuntimeConfig, type RuntimeConfig } from '@/lib/config';
 import { resetFileCookies } from '@/lib/files';
+import { recordClientDiagnostic } from '@/lib/diagnostics';
 import { AuthContext, type AuthContextValue, type AuthStatus } from './auth-context';
 
 export const fetchMe = () => apiFetch('/me', { schema: MeResponseSchema });
@@ -23,7 +24,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const refresh = useCallback(async (): Promise<MeResponse | null> => {
-    const token = await getAccessToken();
+    let token: string | undefined;
+    try {
+      token = await getAccessToken();
+    } catch (cause) {
+      recordClientDiagnostic(cause, 'auth.token');
+      setError(errorMessage(cause));
+      setStatus('error');
+      return null;
+    }
     if (!token) { signOutLocally(); return null; }
     try {
       const profile = await fetchMe();
@@ -51,6 +60,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       })
       .catch((cause: unknown) => {
         if (!active) return;
+        recordClientDiagnostic(cause, 'auth.bootstrap');
         setError(errorMessage(cause));
         setStatus('error');
       });

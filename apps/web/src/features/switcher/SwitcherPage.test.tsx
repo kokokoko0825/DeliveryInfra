@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { FakeTrack, installMediaGlobals, stageMock, tokenResponse, type FakeSession } from '@/lib/ivs/testing';
+import { clearClientDiagnostics, listClientDiagnostics } from '@/lib/diagnostics';
 
 const sessions = vi.hoisted(() => [] as FakeSession[]);
 const api = vi.hoisted(() => ({
@@ -44,6 +45,7 @@ async function startSwitcher() {
 const tile = (name: RegExp) => screen.getByRole('button', { name });
 
 beforeEach(() => {
+  clearClientDiagnostics();
   sessions.length = 0;
   installMediaGlobals();
   Object.values(graph).forEach((value) => typeof value === 'function' && 'mockClear' in value && value.mockClear());
@@ -58,6 +60,14 @@ beforeEach(() => {
 });
 
 describe('SwitcherPage (A-01)', () => {
+  it('records a local switcher startup failure', async () => {
+    graph.resume.mockRejectedValue(new Error('AudioContext resume failed'));
+    renderPage();
+    fireEvent.click(screen.getByRole('button', { name: 'スイッチャーを起動' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('AudioContext resume failed');
+    expect(listClientDiagnostics()).toMatchObject([{ source: 'switcher.start', message: 'AudioContext resume failed' }]);
+  });
+
   it('shows the preflight check and the moderation comment panel', async () => {
     renderPage();
     expect(await screen.findByText('配信の準備ができています')).toBeInTheDocument();

@@ -3,6 +3,7 @@ import { Stage, StageConnectionState, StageEvents, SubscribeType, type StageStra
 import { StageTokenResponseSchema } from '@delivery/shared';
 import { apiFetch, errorMessage } from './api';
 import { backoffMs } from './retry';
+import { recordClientDiagnostic } from './diagnostics';
 
 export type ViewerState = 'idle' | 'connecting' | 'connected' | 'reconnecting';
 
@@ -66,6 +67,7 @@ export function useViewerStage(active: boolean): { stream: MediaStream | null; s
         });
         await current.join();
       } catch (cause) {
+        recordClientDiagnostic(cause, 'viewer.stage.join', { retryAttempt: attempt });
         setError(errorMessage(cause));
         scheduleReconnect();
       }

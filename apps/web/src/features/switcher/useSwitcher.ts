@@ -16,6 +16,8 @@ import { createAudioGraph, type AudioGraph } from './media/audioGraph';
 import { createDefaultStandby, drawFrame, type Drawable } from './media/compositor';
 import { startFrameClock } from './media/frameClock';
 import { createVideoRegistry } from './media/videoRegistry';
+import { ApiError } from '@/lib/api';
+import { recordClientDiagnostic } from '@/lib/diagnostics';
 
 export const HEALTH_INTERVAL_MS = 500;
 export const BITRATE_INTERVAL_MS = 2000;
@@ -123,7 +125,9 @@ export function useSwitcher() {
         const sample = report ? sumOutboundBytes(report.values()) : null;
         setBitrate(bitrateKbps(previous, sample));
         previous = sample;
-      }).catch(() => undefined);
+      }).catch((error) => {
+        if (!(error instanceof ApiError)) recordClientDiagnostic(error, 'switcher.broadcast.stats');
+      });
     }, BITRATE_INTERVAL_MS);
     return () => {
       clearInterval(timer);
@@ -200,6 +204,7 @@ export function useSwitcher() {
       if (sessions.current.broadcast === broadcast) setPublishing(true);
     } catch (error) {
       if (!resume) stopPublishing();
+      if (resume && !(error instanceof ApiError)) recordClientDiagnostic(error, 'switcher.broadcast.start', { resume: true });
       throw error;
     }
   }, [setStatus, stopPublishing, switcherToken]);

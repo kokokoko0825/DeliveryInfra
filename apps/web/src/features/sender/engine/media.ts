@@ -15,9 +15,25 @@ export function cameraConstraints(facing: Facing): MediaStreamConstraints {
   };
 }
 
-/** マイク: 48kHz モノラル。話し声用に処理を有効化する。 */
+/** マイク: 配信向けに処理した48kHzモノラルトラック。会場向けは同じ入力源のcloneを別設定にする。 */
 export function micConstraints(): MediaStreamConstraints {
   return { video: false, audio: { sampleRate: 48000, channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } };
+}
+
+/** 同じ物理マイク入力を共有する会場用cloneだけ、取得時処理を無効にする。 */
+export async function createVenueMicTrack(source: MediaStreamTrack): Promise<MediaStreamTrack> {
+  const track = source.clone();
+  try {
+    await track.applyConstraints({ echoCancellation: false, noiseSuppression: false, autoGainControl: false });
+    const settings = track.getSettings();
+    if (settings.echoCancellation !== false || settings.noiseSuppression !== false || settings.autoGainControl !== false) {
+      throw new Error('このブラウザでは会場用マイクの低遅延設定を確認できません');
+    }
+    return track;
+  } catch (error) {
+    track.stop();
+    throw error;
+  }
 }
 
 /** 画面共有: 1280x720 最大30fps、システム/タブ音声を含める（F-SHR-03, 04）。 */

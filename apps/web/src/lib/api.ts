@@ -1,4 +1,5 @@
 import { ApiErrorResponseSchema } from '@delivery/shared';
+import { recordClientDiagnostic } from './diagnostics';
 
 const apiBase = import.meta.env.VITE_API_BASE_URL ?? '/api';
 type FetchOptions<T> = Omit<RequestInit, 'body'> & {
@@ -10,7 +11,7 @@ type FetchOptions<T> = Omit<RequestInit, 'body'> & {
 type TokenProvider = (forceRefresh: boolean) => Promise<string | undefined>;
 
 export class ApiError extends Error {
-  constructor(public readonly status: number, public readonly code: string, public readonly detail: string) {
+  constructor(public readonly status: number, public readonly code: string, public readonly detail: string, public readonly requestId?: string) {
     super(`${code}: ${detail}`);
     this.name = 'ApiError';
   }
@@ -52,30 +53,42 @@ async function toApiError(response: Response): Promise<ApiError> {
   let data: unknown;
   try { data = text ? JSON.parse(text) : undefined; } catch { data = undefined; }
   const parsed = ApiErrorResponseSchema.safeParse(data);
-  if (parsed.success) return new ApiError(response.status, parsed.data.error.code, parsed.data.error.message);
-  return new ApiError(response.status, 'HTTP_ERROR', `API エラー (${response.status})`);
+  const requestId = response.headers.get('x-request-id') ?? (parsed.success ? parsed.data.requestId : undefined);
+  if (parsed.success) return new ApiError(response.status, parsed.data.error.code, parsed.data.error.message, requestId);
+  return new ApiError(response.status, 'HTTP_ERROR', `API エラー (${response.status})`, requestId ?? undefined);
 }
 
 export async function apiFetch<T = unknown>(path: string, options: FetchOptions<T> = {}): Promise<T> {
   const { body, token, schema, headers, responseType = 'json', ...request } = options;
-  const serialized = body === undefined ? undefined : JSON.stringify(body);
-  const provided = token === undefined && tokenProvider !== undefined;
-  let response = await send(path, request, headers, serialized, provided ? await tokenProvider?.(false) : token);
-  if (!response.ok) {
-    let error = await toApiError(response);
-    if (provided && error.status === 401 && error.code === 'TOKEN_REFRESH_REQUIRED') {
-      response = await send(path, request, headers, serialized, await tokenProvider?.(true));
-      if (!response.ok) error = await toApiError(response);
-    }
+  try {
+    const serialized = body === undefined ? undefined : JSON.stringify(body);
+    const provided = token === undefined && tokenProvider !== undefined;
+    let response = await send(path, request, headers, serialized, provided ? await tokenProvider?.(false) : token);
     if (!response.ok) {
-      if (provided && error.status === 401) unauthorizedHandler?.();
-      throw error;
+      let error = await toApiError(response);
+      if (provided && error.status === 401 && error.code === 'TOKEN_REFRESH_REQUIRED') {
+        response = await send(path, request, headers, serialized, await tokenProvider?.(true));
+        if (!response.ok) error = await toApiError(response);
+      }
+      if (!response.ok) {
+        if (provided && error.status === 401) unauthorizedHandler?.();
+        throw error;
+      }
     }
+    if (responseType === 'blob') return await response.blob() as T;
+    const text = await response.text();
+    let data: unknown;
+    try { data = text ? JSON.parse(text) : undefined; }
+    catch { throw new Error('API から不正な応答が返されました'); }
+    return schema ? schema.parse(data) : data as T;
+  } catch (error) {
+    if (!(error instanceof ApiError) || error.status >= 400) {
+      recordClientDiagnostic(error, 'apiFetch', {
+        method: (request.method ?? 'GET').toUpperCase(),
+        endpoint: path.split('?')[0],
+        ...(error instanceof ApiError ? { status: error.status, code: error.code, requestId: error.requestId ?? null } : {}),
+      });
+    }
+    throw error;
   }
-  if (responseType === 'blob') return await response.blob() as T;
-  const text = await response.text();
-  let data: unknown;
-  try { data = text ? JSON.parse(text) : undefined; }
-  catch { throw new Error('API から不正な応答が返されました'); }
-  return schema ? schema.parse(data) : data as T;
 }

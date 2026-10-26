@@ -79,7 +79,7 @@ describe('shared schemas', () => {
   });
   it('validates all role-feature combinations', () => {
     const allowed: Record<string, string[]> = {
-      watch: [...ROLES], archives: [...ROLES], cameraSend: ['admin', 'camera'], micSend: ['admin', 'audio'], venueSpeaker: [...ROLES],
+      watch: [...ROLES], archives: [...ROLES], cameraSend: ['admin', 'camera'], micSend: ['admin', 'audio'], venueSpeaker: ['admin', 'audio'],
       slideShare: ['admin', 'presenter'], switcher: ['admin'], broadcastManage: ['admin'], slideManage: ['admin'],
       commentModeration: ['admin'], userManage: ['admin'],
     };

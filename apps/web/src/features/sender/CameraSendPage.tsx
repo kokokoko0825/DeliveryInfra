@@ -9,6 +9,7 @@ import { CAMERA_PUBLISH, cameraConstraints, toPublishTracks, type Facing } from 
 import { canStart, classifyError, isActive, type SenderErrorKind } from './engine/session';
 import { useDeviceName } from './useDeviceName';
 import { useStageSender } from './useStageSender';
+import { recordClientDiagnostic } from '@/lib/diagnostics';
 
 const stopStream = (stream: MediaStream | null) => stream?.getTracks().forEach((track) => track.stop());
 
@@ -64,6 +65,7 @@ export default function CameraSendPage() {
       if (activeRef.current) updateTracks(toPublishTracks(next.getVideoTracks(), CAMERA_PUBLISH, undefined));
       return next;
     } catch (error) {
+      if (!(error instanceof DOMException && error.name === 'AbortError')) recordClientDiagnostic(error, 'media.camera.capture', { facing: nextFacing });
       if (id === request.current) setMediaError(classifyError(error));
       return null;
     }

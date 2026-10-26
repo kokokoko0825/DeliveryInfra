@@ -9,9 +9,13 @@ vi.mock('aws-amplify/auth/enable-oauth-listener', () => ({}));
 vi.mock('aws-amplify/auth', () => amplify);
 
 const auth = await import('./auth');
+const diagnostics = await import('./diagnostics');
 const named = (name: string, message = '') => Object.assign(new Error(message), { name });
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  diagnostics.clearClientDiagnostics();
+});
 
 describe('configureAuth', () => {
   const base = { region: 'ap-northeast-1', userPoolId: 'pool', userPoolClientId: 'client' };
@@ -43,6 +47,21 @@ describe('sign-in flow', () => {
     await expect(auth.completeNewPassword('NewPassword123')).resolves.toBe('DONE');
     expect(amplify.confirmSignIn).toHaveBeenCalledWith({ challengeResponse: 'NewPassword123' });
   });
+  it('records expected credential failures as warnings without storing the submitted email', async () => {
+    amplify.signIn.mockRejectedValue(named('NotAuthorizedException', 'Incorrect username or password.'));
+    await expect(auth.loginWithEmail('private@example.test', 'secret')).rejects.toMatchObject({ name: 'NotAuthorizedException' });
+    const serialized = JSON.stringify(diagnostics.listClientDiagnostics());
+    expect(serialized).toContain('auth.login');
+    expect(serialized).not.toContain('private@example.test');
+    expect(serialized).not.toContain('secret');
+  });
+  it('classifies unconfirmed users and reset-required passwords as expected auth failures', async () => {
+    for (const name of ['UserNotConfirmedException', 'PasswordResetRequiredException']) {
+      amplify.signIn.mockRejectedValueOnce(named(name));
+      await expect(auth.loginWithEmail('a@example.test', 'password')).rejects.toMatchObject({ name });
+      expect(diagnostics.listClientDiagnostics().at(-1)).toMatchObject({ source: 'auth.login', context: { status: 400 } });
+    }
+  });
   it('delegates Okta, reset, and logout', async () => {
     await auth.loginWithOkta('Okta');
     expect(amplify.signInWithRedirect).toHaveBeenCalledWith({ provider: { custom: 'Okta' } });
@@ -63,11 +82,12 @@ describe('getAccessToken', () => {
     await auth.getAccessToken(true);
     expect(amplify.fetchAuthSession).toHaveBeenLastCalledWith({ forceRefresh: true });
   });
-  it('returns undefined when signed out or refresh fails', async () => {
+  it('returns undefined when signed out and records refresh failures', async () => {
     amplify.fetchAuthSession.mockResolvedValue({});
     await expect(auth.getAccessToken()).resolves.toBeUndefined();
     amplify.fetchAuthSession.mockRejectedValue(new Error('disabled'));
     await expect(auth.getAccessToken()).resolves.toBeUndefined();
+    expect(diagnostics.listClientDiagnostics().some((entry) => entry.source === 'auth.token' && entry.message === 'disabled')).toBe(true);
   });
 });
 

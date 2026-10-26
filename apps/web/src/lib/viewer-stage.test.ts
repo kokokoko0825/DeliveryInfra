@@ -1,5 +1,6 @@
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { clearClientDiagnostics, listClientDiagnostics } from './diagnostics';
 
 const sdk = vi.hoisted(() => {
   type Listener = (...args: unknown[]) => void;
@@ -46,6 +47,7 @@ const flush = () => act(async () => { await Promise.resolve(); await Promise.res
 
 let fetchMock: ReturnType<typeof vi.fn>;
 beforeEach(() => {
+  clearClientDiagnostics();
   vi.useFakeTimers();
   sdk.FakeStage.instances = [];
   sdk.FakeStage.failJoin = false;
@@ -154,6 +156,7 @@ describe('useViewerStage', () => {
     await act(async () => { vi.advanceTimersByTime(1000); });
     await flush();
     expect(result.current.error).toBe('join failed');
+    expect(listClientDiagnostics()).toEqual(expect.arrayContaining([expect.objectContaining({ source: 'viewer.stage.join', message: 'join failed' })]));
     sdk.FakeStage.failJoin = false;
     await act(async () => { vi.advanceTimersByTime(2000); });
     await flush();

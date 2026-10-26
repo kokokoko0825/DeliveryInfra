@@ -1,6 +1,7 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { apiError, makeMe } from '@/test/render';
+import { clearClientDiagnostics, listClientDiagnostics } from '@/lib/diagnostics';
 import { useAuth } from './auth-context';
 
 const mocks = vi.hoisted(() => ({
@@ -58,6 +59,15 @@ describe('AuthProvider', () => {
     vi.stubGlobal('fetch', vi.fn());
     renderProvider();
     expect(await screen.findByText('status:signedOut')).toBeInTheDocument();
+  });
+
+  it('records token acquisition failures and leaves loading state', async () => {
+    clearClientDiagnostics();
+    mocks.getAccessToken.mockRejectedValue(new Error('token store unavailable'));
+    renderProvider();
+    expect(await screen.findByText('status:error')).toBeInTheDocument();
+    expect(screen.getByText('error:token store unavailable')).toBeInTheDocument();
+    expect(listClientDiagnostics()).toMatchObject([{ source: 'auth.token', message: 'token store unavailable' }]);
   });
 
   it('signs out on 401 and shows errors otherwise', async () => {

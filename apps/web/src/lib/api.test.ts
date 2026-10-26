@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, apiFetch, errorMessage, setTokenProvider, setUnauthorizedHandler } from './api';
+import { clearClientDiagnostics, listClientDiagnostics } from './diagnostics';
 
 afterEach(() => {
+  clearClientDiagnostics();
   vi.unstubAllGlobals();
   setTokenProvider(undefined);
   setUnauthorizedHandler(undefined);
@@ -37,10 +39,12 @@ describe('apiFetch', () => {
     expect(headerOf(fetchMock, 1, 'X-Auth-Token')).toBeNull();
   });
   it('parses the shared API error shape into ApiError', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json({ error: { code: 'DENIED', message: '拒否' } }, 403)));
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { code: 'DENIED', message: '拒否' }, requestId: 'req-1' }), { status: 403, headers: { 'x-request-id': 'req-1' } })));
     const error = await apiFetch('/private').catch((e: unknown) => e);
     expect(error).toBeInstanceOf(ApiError);
-    expect(error).toMatchObject({ status: 403, code: 'DENIED', detail: '拒否', message: 'DENIED: 拒否' });
+    expect(error).toMatchObject({ status: 403, code: 'DENIED', detail: '拒否', requestId: 'req-1', message: 'DENIED: 拒否' });
+    expect(listClientDiagnostics()).toMatchObject([{ source: 'apiFetch', message: 'DENIED: 拒否', context: { endpoint: '/private', status: 403, code: 'DENIED', requestId: 'req-1' } }]);
   });
   it('falls back to a generic error for non-JSON or unknown errors', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('oops', { status: 502 })));

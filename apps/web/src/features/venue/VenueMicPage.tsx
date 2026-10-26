@@ -14,6 +14,7 @@ import {
 } from './venueRunLog';
 import { saveBlob } from '@/lib/download';
 import { createVenueAcousticRecorder, type VenueAcousticRecorder } from './venueAcousticRecorder';
+import { recordClientDiagnostic } from '@/lib/diagnostics';
 
 type SlotChoice = 'auto' | number;
 type RunControlsProps = {
@@ -30,7 +31,10 @@ export function VenueRunControls({ runId, slot, metrics, onFailure, side, transp
   const [exporting, setExporting] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
 
-  const reloadRuns = () => listVenueRuns().then(setRuns).catch(() => onFailure('IndexedDB の保存済みランを読み込めませんでした。ブラウザのサイトデータ設定を確認してください。'));
+  const reloadRuns = () => listVenueRuns().then(setRuns).catch((reason) => {
+    recordClientDiagnostic(reason, 'venue.run-log.list', { phase: 'history-load', side });
+    onFailure('IndexedDB の保存済みランを読み込めませんでした。ブラウザのサイトデータ設定を確認してください。');
+  });
   useEffect(() => { void reloadRuns(); }, []);
 
   const download = async (id: string, format: 'csv' | 'json') => {
@@ -42,6 +46,7 @@ export function VenueRunControls({ runId, slot, metrics, onFailure, side, transp
       const mime = format === 'csv' ? 'text/csv;charset=utf-8' : 'application/json;charset=utf-8';
       saveBlob(new Blob([content], { type: mime }), `venue-run-${id}.${format === 'csv' ? 'csv' : 'json'}`);
     } catch (reason) {
+      recordClientDiagnostic(reason, 'venue.run-log.export', { phase: 'export', side, format });
       const message = reason instanceof Error ? reason.message : 'エクスポートに失敗しました';
       setExportError(`ラン ${id} を出力できませんでした: ${message}`);
     } finally { setExporting(null); }
@@ -83,8 +88,9 @@ function failureMessage(reason: unknown) {
   if (reason instanceof DOMException && reason.name === 'NotAllowedError')
     return 'マイクの使用が許可されていません。iPhone/iPad では設定アプリでブラウザのマイク権限を許可し、このページを再読み込みしてください。';
   if (reason instanceof DOMException && reason.name === 'NotFoundError') return '使用できるマイクが見つかりません。';
-  return reason instanceof Error ? reason.message : 'マイク接続に失敗しました。マイク権限と同じ LAN の接続を確認してください。';
+  return reason instanceof Error ? reason.message : 'マイク接続に失敗しました。診断ログとネットワーク接続を確認してください。';
 }
+function isAbortError(reason: unknown) { return reason instanceof DOMException && reason.name === 'AbortError' || reason instanceof Error && reason.name === 'AbortError'; }
 
 export function metricsValues(metrics: VenueSessionMetrics): Record<string, number | null> {
   const values: Record<string, number | null> = {
@@ -106,6 +112,9 @@ export function metricsValues(metrics: VenueSessionMetrics): Record<string, numb
     values[`${prefix}.active`] = peer.active ? 1 : 0;
     values[`${prefix}.sideIsMic`] = peer.side === 'mic' ? 1 : 0;
     values[`${prefix}.stateCode`] = ['new', 'connecting', 'connected', 'disconnected', 'failed', 'closed'].indexOf(peer.state);
+    values[`${prefix}.iceStateCode`] = ['new', 'checking', 'connected', 'completed', 'disconnected', 'failed', 'closed'].indexOf(peer.iceState);
+    values[`${prefix}.iceGatheringStateCode`] = ['new', 'gathering', 'complete'].indexOf(peer.iceGatheringState);
+    values[`${prefix}.signalingStateCode`] = ['stable', 'have-local-offer', 'have-remote-offer', 'have-local-pranswer', 'have-remote-pranswer', 'closed'].indexOf(peer.signalingState);
     values[`${prefix}.connected`] = peer.connected ? 1 : 0;
     values[`${prefix}.sentPackets`] = peer.sentPackets;
     values[`${prefix}.sentBytes`] = peer.sentBytes;
@@ -157,6 +166,7 @@ export default function VenueMicPage() {
     const id = runRef.current;
     if (!id) return;
     writeQueue.current = writeQueue.current.then(() => appendVenueRunRecord(id, record)).then(() => undefined).catch((reason) => {
+      recordClientDiagnostic(reason, 'venue.run-log.write', { runId: id, recordType: record.type });
       setError(`計測ログを保存できませんでした: ${reason instanceof Error ? reason.message : 'IndexedDB error'}`);
     });
   };
@@ -176,9 +186,12 @@ export default function VenueMicPage() {
       saveBlob(result.blob, `venue-run-${id}-acoustic.${result.extension}`);
       setRecordingError(null);
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : '音響証拠の保存に失敗しました';
-      setRecordingError(message);
-      if (startedRunId) write(runRecord('error', `recording-error-${Date.now()}`, performance.now() - startMono.current, { code: 'recording', message }));
+      if (!isAbortError(reason)) {
+        const message = reason instanceof Error ? reason.message : '音響証拠の保存に失敗しました';
+        recordClientDiagnostic(reason, 'venue.recording', { phase: 'stop', side: 'mic', runId: startedRunId });
+        setRecordingError(message);
+        if (startedRunId) write(runRecord('error', `recording-error-${Date.now()}`, performance.now() - startMono.current, { code: 'recording', message }));
+      }
     } finally {
       current.cleanup();
       if (recorder.current === current) recorder.current = null;
@@ -194,9 +207,12 @@ export default function VenueMicPage() {
       setRecordingError(null);
       setRecording(true);
     } catch (reason) {
-      const message = reason instanceof Error ? reason.message : 'このブラウザでは音声を録音できません';
-      setRecordingError(message);
-      if (runRef.current) write(runRecord('error', `recording-error-${Date.now()}`, performance.now() - startMono.current, { code: 'recording', message }));
+      if (!isAbortError(reason)) {
+        const message = reason instanceof Error ? reason.message : 'このブラウザでは音声を録音できません';
+        recordClientDiagnostic(reason, 'venue.recording', { phase: 'start', side: 'mic', runId: runRef.current });
+        setRecordingError(message);
+        if (runRef.current) write(runRecord('error', `recording-error-${Date.now()}`, performance.now() - startMono.current, { code: 'recording', message }));
+      }
     }
   };
   const stop = async () => {
@@ -212,6 +228,7 @@ export default function VenueMicPage() {
       event('stop');
       const id = runRef.current;
       writeQueue.current = writeQueue.current.then(() => endVenueRun(id, utcNow())).then(() => undefined).catch((reason) => {
+        recordClientDiagnostic(reason, 'venue.run-log.end', { phase: 'stop', side: 'mic', runId: id });
         setError(`ランを終了保存できませんでした: ${reason instanceof Error ? reason.message : 'IndexedDB error'}`);
       });
       runRef.current = null;
@@ -229,7 +246,9 @@ export default function VenueMicPage() {
     if (activeRecorder) {
       void activeRecorder.stop().then((result) => {
         if (result.byteCount > 0 && idForRecording) saveBlob(result.blob, `venue-run-${idForRecording}-acoustic.${result.extension}`);
-      }).catch(() => undefined).finally(() => activeRecorder.cleanup());
+      }).catch((reason) => {
+        if (!isAbortError(reason)) recordClientDiagnostic(reason, 'venue.recording', { phase: 'unmount-stop', side: 'mic', runId: idForRecording });
+      }).finally(() => activeRecorder.cleanup());
     }
     stream.current?.getTracks().forEach((track) => track.stop());
     if (runRef.current) {
@@ -237,7 +256,7 @@ export default function VenueMicPage() {
       const elapsedMs = performance.now() - startMono.current;
       writeQueue.current = writeQueue.current
         .then(() => appendVenueRunRecord(id, runRecord('transport', `unmount-${Date.now()}`, elapsedMs, { event: 'stop', detail: 'page-unmount' })))
-        .then(() => endVenueRun(id, utcNow())).catch(() => undefined);
+        .then(() => endVenueRun(id, utcNow())).catch((reason) => { recordClientDiagnostic(reason, 'venue.run-log.end', { phase: 'unmount', side: 'mic', runId: id }); });
     }
   }, []);
 
@@ -298,11 +317,24 @@ export default function VenueMicPage() {
         setStatus('エラー');
       });
     } catch (reason) {
+      if (isAbortError(reason)) {
+        stream.current?.getTracks().forEach((track) => track.stop());
+        stream.current = null;
+        if (runRef.current) {
+          const id = runRef.current;
+          runRef.current = null;
+          await endVenueRun(id, utcNow()).catch((cleanupError) => recordClientDiagnostic(cleanupError, 'venue.run-log.end', { phase: 'cancel-start', side: 'mic', runId: id }));
+        }
+        setStatus('停止');
+        setRecordingAvailable(false);
+        return;
+      }
       const message = failureMessage(reason);
+      recordClientDiagnostic(reason, 'venue.session', { phase: 'start', side: 'mic', transport, slot: slotChoice === 'auto' ? null : slotChoice });
       if (runRef.current) {
         write(runRecord('error', `error-${Date.now()}`, performance.now() - startMono.current, { code: 'start', message }));
         const closingRun = runRef.current;
-        writeQueue.current = writeQueue.current.then(() => endVenueRun(closingRun, utcNow())).then(() => undefined).catch(() => undefined);
+        writeQueue.current = writeQueue.current.then(() => endVenueRun(closingRun, utcNow())).then(() => undefined).catch((cleanupError) => { recordClientDiagnostic(cleanupError, 'venue.run-log.end', { phase: 'failed-start', side: 'mic', runId: closingRun }); });
         runRef.current = null;
       }
       stream.current?.getTracks().forEach((track) => track.stop());
@@ -334,7 +366,7 @@ export default function VenueMicPage() {
       {metrics && <section aria-label="接続メトリクス" className="space-y-1 text-sm">
         <p>ピア接続: {metrics.connectedPeers}/{metrics.activePeers}</p>
         <p>診断 RTT: {metrics.rttMs === null ? '未計測' : `${metrics.rttMs.toFixed(1)} ms`}（ネットワーク往復時間。片道音声遅延ではありません）</p>
-        <ul>{metrics.peers.map((peer) => <li key={peer.peerId}>{peer.side === 'speaker' ? 'SPK' : 'MIC'}{peer.slot}: {peer.connected ? '接続済み' : peer.state}</li>)}</ul>
+        <ul>{metrics.peers.map((peer) => <li key={peer.peerId}>{peer.side === 'speaker' ? 'SPK' : 'MIC'}{peer.slot}: {peer.connected ? '接続済み' : peer.state} / ICE {peer.iceState} / SDP {peer.signalingState}</li>)}</ul>
       </section>}
       {recordingAvailable && <section aria-label="音響証拠録音" className="space-y-2 rounded border p-3">
         <p className="text-sm">音響証拠の録音は端末内で行い、停止時にファイルを保存します。基準音とスピーカー戻り音の記録に使えますが、校正された遅延測定ではありません。</p>
@@ -342,7 +374,7 @@ export default function VenueMicPage() {
         {recordingError && <p role="alert" className="text-sm text-destructive">{recordingError}</p>}
       </section>}
       {!runRef.current ? <Button className="h-11 w-full" onClick={() => void start()}><Mic aria-hidden />接続開始</Button> : <Button variant="outline" className="h-11 w-full" onClick={stop}><Square aria-hidden />停止</Button>}
-      <p className="text-sm text-muted-foreground">iPhone/iPad で許可画面が表示された場合はマイク使用を許可してください。同じ LAN のスピーカー端末を開始すると接続します。</p>
+      <p className="text-sm text-muted-foreground">iPhone/iPad で許可画面が表示された場合はマイク使用を許可してください。同じルームのスピーカー端末を開始すると接続します。</p>
       <VenueRunControls runId={runIdValue} slot={ownSlot} metrics={metrics} onFailure={setError} side="mic" transport={runTransport} />
     </SenderShell>
   );

@@ -3,6 +3,7 @@ import { ChatRoom, SendMessageRequest, type ChatMessage } from 'amazon-ivs-chat-
 import { CHAT_DENY_REASONS, CHAT_EVENTS, COMMENT_HISTORY_LIMIT, ChatTokenResponseSchema, RecentCommentsResponseSchema, type ChatEventName, type Comment } from '@delivery/shared';
 import { apiFetch } from './api';
 import { backoffMs } from './retry';
+import { recordClientDiagnostic } from './diagnostics';
 
 export type { ChatEventName };
 export type ChatConnection = 'connecting' | 'connected' | 'disconnected';
@@ -91,7 +92,7 @@ export function useChatRoom({ enabled, region, onEvent, onServerDisconnect }: Us
     let timer: ReturnType<typeof setTimeout> | undefined;
     const reload = () => fetchRecentComments()
       .then((history) => { if (!disposed) setComments((current) => replaceWithHistory(current, history)); })
-      .catch(() => undefined);
+      .catch((error) => { recordClientDiagnostic(error, 'chat.history'); });
     const room = new ChatRoom({
       regionOrUrl: region,
       tokenProvider: async () => {
@@ -107,6 +108,7 @@ export function useChatRoom({ enabled, region, onEvent, onServerDisconnect }: Us
       room.addListener('disconnect', (reason) => {
         setConnection('disconnected');
         if (disposed || reason === 'clientDisconnect') return;
+        recordClientDiagnostic(new Error(`IVS Chat disconnected: ${reason}`), 'chat.connection', { reason, retryAttempt: attempt });
         if (reason === 'serverDisconnect') onServerDisconnectRef.current?.();
         timer = setTimeout(() => room.connect(), backoffMs(attempt));
         attempt += 1;

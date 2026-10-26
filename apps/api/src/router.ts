@@ -41,7 +41,7 @@ export interface FunctionUrlEvent {
   cookies?: string[];
   body?: string | null;
   isBase64Encoded?: boolean;
-  requestContext: { http: { method: string; path: string; sourceIp?: string; userAgent?: string } };
+  requestContext: { requestId?: string; http: { method: string; path: string; sourceIp?: string; userAgent?: string } };
 }
 export interface LambdaResponse { statusCode: number; headers: Record<string, string>; body: string; cookies?: string[] }
 interface ApiDependencies { env: Env; clients: Clients; authenticate?: typeof authenticate; now?: () => number }
@@ -80,15 +80,31 @@ const pathParts = (path: string) => path.split('/').filter(Boolean).map(decodeUR
 const iso = (ms: number) => new Date(ms).toISOString();
 const entity = (pk: string, sk: string, extra: JsonRecord = {}): Entity => ({ PK: pk, SK: sk, ...extra });
 const errorName = (error: unknown) => (error as { name?: string }).name;
+const safeErrorDetails = (error: unknown) => {
+  const candidate = error as { name?: unknown; code?: unknown; $metadata?: { requestId?: unknown; extendedRequestId?: unknown; cfId?: unknown } } | null;
+  const safeString = (value: unknown) => typeof value === 'string' && /^[A-Za-z0-9_.-]{1,100}$/u.test(value) ? value : undefined;
+  const metadata = candidate?.$metadata;
+  return {
+    ...(safeString(candidate?.name) ? { name: safeString(candidate?.name) } : {}),
+    ...(safeString(candidate?.code) ? { errorCode: safeString(candidate?.code) } : {}),
+    ...(safeString(metadata?.requestId) ? { awsRequestId: safeString(metadata?.requestId) } : {}),
+    ...(safeString(metadata?.extendedRequestId) ? { awsExtendedRequestId: safeString(metadata?.extendedRequestId) } : {}),
+    ...(safeString(metadata?.cfId) ? { awsCfId: safeString(metadata?.cfId) } : {}),
+  };
+};
 const isResourceNotFound = (error: unknown) => errorName(error) === 'ResourceNotFoundException';
 /** 条件付き更新の失敗（対象なし・競合）を 404 にする（R1-14）。 */
 const orNotFound = async <T>(promise: Promise<T>): Promise<T> => {
   try { return await promise; } catch (error) { if (isConditionalFailure(error)) throw notFound(); throw error; }
 };
-const failureResponse = (error: unknown): LambdaResponse => {
+const failureResponse = (error: unknown, requestId: string, event: FunctionUrlEvent): LambdaResponse => {
   const err = error instanceof HttpError ? error : new HttpError(500, 'INTERNAL_ERROR', '処理に失敗しました');
-  if (err.statusCode >= 500) console.error(JSON.stringify({ error: err.code, name: errorName(error), message: error instanceof Error ? error.message : String(error) }));
-  return json(err.statusCode, { error: { code: err.code, message: err.message } });
+  if (err.statusCode >= 500) console.error(JSON.stringify({
+    level: 'error', event: 'api_request_failed', requestId,
+    method: event.requestContext.http.method.toUpperCase(), path: event.rawPath || event.requestContext.http.path,
+    status: err.statusCode, code: err.code, ...safeErrorDetails(error),
+  }));
+  return json(err.statusCode, { error: { code: err.code, message: err.message }, requestId }, { 'x-request-id': requestId });
 };
 const attribute = (attributes: AttributeType[] | undefined, name: string) => attributes?.find((item) => item.Name === name)?.Value;
 const loginMethodOf = (attributes: AttributeType[] | undefined) => {
@@ -114,7 +130,7 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
    * 通知の欠落は、クライアントのポーリングと再取得で回復する。
    * SendEvent が応答しないときも Lambda のタイムアウトで 5xx にならないよう、全体を NOTIFY_DEADLINE_MS で打ち切る（R5-01）。
    */
-  async function notify(eventName: ChatEventName) {
+  async function notify(eventName: ChatEventName, requestId: string) {
     const validated = valid(ChatCustomEventSchema, { eventName });
     const controller = new AbortController();
     const deadline = setTimeout(() => controller.abort(Object.assign(new Error('Chat notification deadline exceeded'), { name: 'TimeoutError' })), NOTIFY_DEADLINE_MS);
@@ -128,7 +144,7 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
           return;
         } catch (error) {
           if (attempt >= NOTIFY_RETRIES || controller.signal.aborted) {
-            console.warn(JSON.stringify({ warning: 'CHAT_EVENT_FAILED', eventName, name: errorName(error), message: error instanceof Error ? error.message : String(error) }));
+            console.warn(JSON.stringify({ warning: 'CHAT_EVENT_FAILED', eventName, requestId, ...safeErrorDetails(error) }));
             return;
           }
           await new Promise((resolve) => setTimeout(resolve, NOTIFY_BACKOFF_MS * 2 ** attempt));
@@ -166,7 +182,7 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
     return current.userId === principal.userId || principal.role === 'admin';
   }
 
-  async function acquireDevice(principal: Principal, purpose: DevicePurpose, deviceName: string, takeover: boolean): Promise<{ deviceId: string; sk: string }> {
+  async function acquireDevice(principal: Principal, purpose: DevicePurpose, deviceName: string, takeover: boolean, requestId: string): Promise<{ deviceId: string; sk: string }> {
     const nowS = nowSeconds();
     const leases = await getDb().query<Lease>(KEYS.devicePk, { skPrefix: `${purpose}#`, consistentRead: true });
     // 同名の稼働中端末: 他人なら拒否。本人でも takeover を明示したときだけ置き換える（R1-18 / R3-02）。
@@ -198,7 +214,9 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
       } catch (error) {
         // 旧参加者が接続したままなので旧枠を戻す。条件付きにして、その後の他端末の取得は上書きしない（R2-01）
         // 切断を試みるのは旧枠がある場合だけなので previous は ALL_OLD の完全な行
-        await getDb().put(previous as Entity, 'deviceId = :deviceId', { ':deviceId': deviceId }).catch(() => undefined);
+        await getDb().put(previous as Entity, 'deviceId = :deviceId', { ':deviceId': deviceId }).catch((cleanupError) => {
+          console.error(JSON.stringify({ event: 'DEVICE_LEASE_COMPENSATION_FAILED', requestId, ...safeErrorDetails(cleanupError), originalError: safeErrorDetails(error) }));
+        });
         throw error;
       }
       return { deviceId, sk };
@@ -206,7 +224,7 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
     throw conflict('DEVICE_LIMIT', '送信端末の上限に達しています');
   }
 
-  async function issueStageToken(principal: Principal, purpose: StagePurpose, deviceName?: string, takeover = false) {
+  async function issueStageToken(principal: Principal, purpose: StagePurpose, deviceName: string | undefined, takeover: boolean | undefined, requestId: string) {
     if (!canRequestPurpose(principal.role, purpose)) throw forbidden();
     const env = getEnvValue();
     // switcher は端末枠を使わない（R1-02）。1回の応答の3トークンを Web が使い回す。
@@ -219,7 +237,7 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
     };
     const resolvedDeviceName = purpose === 'slide' ? 'SLIDE' : deviceName ?? purpose.toUpperCase();
     const attributes = purpose === 'viewer' ? undefined : { kind: purpose, deviceName: resolvedDeviceName };
-    const device = purpose === 'camera' || purpose === 'mic' || purpose === 'slide' ? await acquireDevice(principal, purpose, resolvedDeviceName, takeover) : undefined;
+    const device = purpose === 'camera' || purpose === 'mic' || purpose === 'slide' ? await acquireDevice(principal, purpose, resolvedDeviceName, takeover ?? false, requestId) : undefined;
     try {
       const tokens = await Promise.all(stagesByPurpose[purpose].map(async ([stageName, stageArn, capability]) => {
         const result = await getClients().ivs.send(new CreateParticipantTokenCommand({
@@ -236,7 +254,9 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
       }
       return { tokens: tokens.map(({ stage, token, participantId, capabilities, expiresAt }) => ({ stage, token, participantId, capabilities, expiresAt })), ...(device ? { deviceId: device.deviceId } : {}) };
     } catch (error) {
-      if (device) await getDb().delete(KEYS.devicePk, device.sk, 'deviceId = :deviceId', { ':deviceId': device.deviceId }).catch(() => undefined);
+      if (device) await getDb().delete(KEYS.devicePk, device.sk, 'deviceId = :deviceId', { ':deviceId': device.deviceId }).catch((cleanupError) => {
+        console.error(JSON.stringify({ event: 'DEVICE_LEASE_CLEANUP_FAILED', requestId, ...safeErrorDetails(cleanupError), originalError: safeErrorDetails(error) }));
+      });
       throw error;
     }
   }
@@ -289,20 +309,20 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
     await getDb().put(entity(KEYS.user(userId), TOKEN_VALID_AFTER_SK, { tokenValidAfter: nowSeconds() }));
   }
 
-  async function handle(event: FunctionUrlEvent): Promise<LambdaResponse> {
+  async function handle(event: FunctionUrlEvent, requestId: string): Promise<LambdaResponse> {
     const path = event.rawPath || event.requestContext.http.path;
     const method = event.requestContext.http.method.toUpperCase();
     const parts = pathParts(path);
-    if (parts[0] !== 'api') return json(404, { error: { code: 'NOT_FOUND', message: '対象が見つかりません' } });
+    if (parts[0] !== 'api') return json(404, { error: { code: 'NOT_FOUND', message: '対象が見つかりません' }, requestId });
     try {
       const headers = event.headers ?? {};
       const token = Object.entries(headers).find(([key]) => key.toLowerCase() === 'x-auth-token')?.[1];
       const principal = await auth(token, getEnvValue(), getDb());
-      return await route(parts.slice(1), method, event, principal);
-    } catch (error) { return failureResponse(error); }
+      return await route(parts.slice(1), method, event, principal, requestId);
+    } catch (error) { return failureResponse(error, requestId, event); }
   }
 
-  async function route(parts: string[], method: string, event: FunctionUrlEvent, principal: Principal): Promise<LambdaResponse> {
+  async function route(parts: string[], method: string, event: FunctionUrlEvent, principal: Principal, requestId: string): Promise<LambdaResponse> {
     const path = `/${parts.join('/')}`;
     const body = objectBody(event);
     const db = getDb();
@@ -348,12 +368,16 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
         if (compositionArn) await db.put(entity(KEYS.compositionPk(compositionArn), 'META', { broadcastId, title, startedAt, outputPrefix }));
       } catch (error) {
         // Composition を開始済みなら止める。残すと録画と課金が続き、META がないためアーカイブにも載らない（R3-11）
-        if (compositionArn) await clients.ivs.send(new StopCompositionCommand({ arn: compositionArn })).catch(() => undefined);
-        await db.delete('BROADCAST', 'CURRENT', 'id = :id', { ':id': broadcastId }).catch(() => undefined);
+        if (compositionArn) await clients.ivs.send(new StopCompositionCommand({ arn: compositionArn })).catch((cleanupError) => {
+          console.error(JSON.stringify({ event: 'BROADCAST_COMPOSITION_COMPENSATION_FAILED', requestId, ...safeErrorDetails(cleanupError), originalError: safeErrorDetails(error) }));
+        });
+        await db.delete('BROADCAST', 'CURRENT', 'id = :id', { ':id': broadcastId }).catch((cleanupError) => {
+          console.error(JSON.stringify({ event: 'BROADCAST_RECORD_CLEANUP_FAILED', requestId, ...safeErrorDetails(cleanupError), originalError: safeErrorDetails(error) }));
+        });
         throw error;
       }
       audit(principal, 'broadcast.start');
-      await notify('broadcast-started');
+      await notify('broadcast-started', requestId);
       return success({ id: broadcastId, title, status: 'live', startedAt, endedAt: null });
     }
     if (path === '/broadcast/stop' && method === 'POST') {
@@ -362,7 +386,7 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
       if (broadcast?.status === 'ended') {
         // 前回の停止で通知が届かなかった場合の再試行。終了通知を再送する（重複はクライアントが許容する、R2-03）
         audit(principal, 'broadcast.stop.retry', broadcast.id);
-        await notify('broadcast-ended');
+        await notify('broadcast-ended', requestId);
         return success({ id: broadcast.id, title: broadcast.title, status: 'ended', startedAt: broadcast.startedAt, endedAt: broadcast.endedAt ?? null });
       }
       if (!broadcast || broadcast.status !== 'live') throw conflict('BROADCAST_NOT_LIVE', '配信中ではありません');
@@ -374,7 +398,7 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
       const endedAt = iso(now());
       await db.update('BROADCAST', 'CURRENT', 'SET #status = :status, endedAt = :endedAt', { ':status': 'ended', ':endedAt': endedAt }, 'attribute_exists(PK)', { '#status': 'status' });
       audit(principal, 'broadcast.stop', broadcast.id);
-      await notify('broadcast-ended');
+      await notify('broadcast-ended', requestId);
       return success({ id: broadcast.id, title: broadcast.title, status: 'ended', startedAt: broadcast.startedAt, endedAt });
     }
     if (path === '/broadcast/stats' && method === 'GET') {
@@ -410,11 +434,12 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
     }
     if (path === '/tokens/stage' && method === 'POST') {
       const request = valid(StageTokenRequestSchema, body);
-      return success(await issueStageToken(principal, request.purpose, request.deviceName, request.takeover));
+      return success(await issueStageToken(principal, request.purpose, request.deviceName, request.takeover, requestId));
     }
     // Room-scoped local WebRTC signaling. DynamoDB's existing table provides
     // atomic slot reservations; TTL is checked in application code as well.
     if (parts[0] === 'venue-speaker' && parts[1] === 'rooms' && parts.length >= 4) {
+      adminFeature(principal, 'venueSpeaker');
       const roomId = parts[2]!;
       if (!/^[A-Za-z0-9_-]{1,64}$/u.test(roomId)) throw badRequest('roomId が不正です');
       const roomPk = `VENUE_ROOM#${roomId}`;
@@ -611,7 +636,7 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
       const order = (await db.query<Entity & JsonRecord>(KEYS.slidePk)).filter((slide) => slide.published).length;
       await orNotFound(db.update(KEYS.slidePk, id, 'SET published = :published, #status = :status, #order = :order', { ':published': true, ':status': 'ready', ':order': order }, 'attribute_exists(PK)', { '#status': 'status', '#order': 'order' }));
       audit(principal, 'slide.complete', id);
-      await notify('slides-updated');
+      await notify('slides-updated', requestId);
       return success(toSlide({ ...item, published: true, status: 'ready', order }));
     }
     if (parts[0] === 'slides' && parts[1] && parts.length === 2 && method === 'PATCH') {
@@ -629,7 +654,7 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
       const { ids } = valid(SlideOrderRequestSchema, body);
       await orNotFound(Promise.all(ids.map((id, order) => db.update(KEYS.slidePk, id, 'SET #order = :order', { ':order': order }, 'attribute_exists(PK)', { '#order': 'order' }))));
       audit(principal, 'slide.order');
-      await notify('slides-updated');
+      await notify('slides-updated', requestId);
       return success();
     }
     if (parts[0] === 'slides' && parts[1] && parts.length === 2 && method === 'DELETE') {
@@ -640,7 +665,7 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
       await clients.s3.send(new DeleteObjectsCommand({ Bucket: env.CONTENT_BUCKET, Delete: { Objects: [{ Key: String(item.key) }] } }));
       await db.delete(KEYS.slidePk, id);
       audit(principal, 'slide.delete', id);
-      await notify('slides-updated');
+      await notify('slides-updated', requestId);
       return success();
     }
     if (path === '/archives' && method === 'GET') {
@@ -675,7 +700,7 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
       }
       await orNotFound(db.update(KEYS.archivePk, id, `SET ${setters.join(', ')}`, values, 'attribute_exists(PK)', patch.retainUntil === undefined ? undefined : { '#ttl': 'ttl' }));
       audit(principal, 'archive.update', id);
-      await notify('archives-updated');
+      await notify('archives-updated', requestId);
       return success(toArchive(await getArchive(id)));
     }
     if (parts[0] === 'archives' && parts[1] && parts.length === 2 && method === 'DELETE') {
@@ -686,7 +711,7 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
       await deletePrefix(clients.s3, env.RECORDING_BUCKET, archivePrefix(item));
       await db.delete(KEYS.archivePk, id);
       audit(principal, 'archive.delete', id);
-      await notify('archives-updated');
+      await notify('archives-updated', requestId);
       return success();
     }
     if (path === '/files/cookies' && method === 'POST') return signedCookies(event, '/files/slides/');
@@ -711,7 +736,7 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
             try {
               await clients.cognito.send(new AdminDeleteUserCommand({ UserPoolId: env.USER_POOL_ID, Username: username }));
             } catch (deleteError) {
-              console.error(JSON.stringify({ error: 'INVITE_COMPENSATION_FAILED', name: errorName(deleteError), groupError: errorName(groupError) }));
+              console.error(JSON.stringify({ event: 'INVITE_COMPENSATION_FAILED', requestId, ...safeErrorDetails(deleteError), groupError: safeErrorDetails(groupError) }));
               audit(principal, 'user.invite.created_without_role', username);
               result.failed.push({ email, reason: 'CREATED_WITHOUT_ROLE' });
               continue;
@@ -722,7 +747,7 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
         } catch (error) {
           const name = errorName(error);
           const reason = name === 'UsernameExistsException' ? 'ALREADY_EXISTS' : name === 'InvalidParameterException' ? 'INVALID_PARAMETER' : 'FAILED';
-          if (reason === 'FAILED') console.error(JSON.stringify({ error: 'INVITE_FAILED', name, message: error instanceof Error ? error.message : String(error) }));
+          if (reason === 'FAILED') console.error(JSON.stringify({ event: 'INVITE_FAILED', requestId, ...safeErrorDetails(error) }));
           result.failed.push({ email, reason });
         }
       }
@@ -779,11 +804,16 @@ export function createApiHandler(dependencies?: Partial<ApiDependencies>) {
       audit(principal, 'user.delete', userId);
       return success();
     }
-    return json(404, { error: { code: 'NOT_FOUND', message: '対象が見つかりません' } });
+    return json(404, { error: { code: 'NOT_FOUND', message: '対象が見つかりません' }, requestId });
   }
 
   return async (event: FunctionUrlEvent): Promise<LambdaResponse> => {
-    try { return await handle(event); } catch (error) { return failureResponse(error); }
+    const requestId = event.requestContext.requestId || randomUUID();
+    try {
+      const response = await handle(event, requestId);
+      response.headers['x-request-id'] = requestId;
+      return response;
+    } catch (error) { return failureResponse(error, requestId, event); }
   };
 }
 

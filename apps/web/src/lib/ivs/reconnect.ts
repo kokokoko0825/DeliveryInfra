@@ -1,5 +1,6 @@
 /** 自動再接続の制御（DOM/IVS 非依存）。待ち時間は lib/retry の backoffMs を使う。 */
 import { backoffMs } from '@/lib/retry';
+import { recordClientDiagnostic } from '@/lib/diagnostics';
 
 export type Scheduler = { setTimeout: (fn: () => void, ms: number) => unknown; clearTimeout: (handle: unknown) => void };
 export const realScheduler: Scheduler = {
@@ -34,6 +35,7 @@ export function createReconnector(connect: () => Promise<void>, scheduler: Sched
       running = false;
     } catch (error) {
       running = false;
+      recordClientDiagnostic(error, 'ivs.reconnect', { retryAttempt: attempt });
       schedule();
       throw error;
     }

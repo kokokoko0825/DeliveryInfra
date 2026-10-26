@@ -13,6 +13,7 @@ import { Separator } from '@/components/ui/separator';
 import { useAuth } from '@/features/auth/auth-context';
 import { ChatProvider } from '@/features/viewer/ChatProvider';
 import { ROLE_LABELS } from './roles';
+import { DiagnosticExportButton } from './DiagnosticExportButton';
 
 type NavItem = { to: string; label: string; icon: LucideIcon; feature: Feature };
 
@@ -22,8 +23,7 @@ export const USER_NAV: readonly NavItem[] = [
   { to: '/archives', label: 'アーカイブ', icon: Archive, feature: 'archives' },
   { to: '/send/camera', label: 'カメラ送信', icon: Camera, feature: 'cameraSend' },
   { to: '/send/mic', label: 'マイク送信', icon: Mic, feature: 'micSend' },
-  { to: '/venue/mic', label: '会場音声 PoC（マイク）', icon: Mic, feature: 'venueSpeaker' },
-  { to: '/venue/speaker', label: '会場音声 PoC（スピーカー）', icon: MonitorPlay, feature: 'venueSpeaker' },
+  { to: '/venue/speaker', label: '会場スピーカー', icon: MonitorPlay, feature: 'venueSpeaker' },
   { to: '/send/slide', label: 'スライド共有', icon: MonitorUp, feature: 'slideShare' },
 ];
 
@@ -78,6 +78,7 @@ export function AppLayout() {
               <p className="font-medium break-all">{me.displayName}</p>
               <p className="text-muted-foreground">{ROLE_LABELS[me.role]}</p>
             </div>
+            <DiagnosticExportButton />
             <Button variant="outline" className="min-h-11 justify-start" onClick={() => { void logout(); }}>
               <LogOut aria-hidden />ログアウト
             </Button>

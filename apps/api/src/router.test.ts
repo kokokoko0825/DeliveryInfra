@@ -106,7 +106,8 @@ describe('API router', () => {
   ] as const)('returns exact 404 for unsupported method %s %s', async (method, path) => {
     const response = await request('admin', method, path);
     expect(response.statusCode).toBe(404);
-    expect(data(response)).toEqual({ error: { code: 'NOT_FOUND', message: '対象が見つかりません' } });
+    expect(response.headers['x-request-id']).toMatch(/^[0-9a-f-]{36}$/u);
+    expect(data(response)).toEqual({ error: { code: 'NOT_FOUND', message: '対象が見つかりません' }, requestId: response.headers['x-request-id'] });
     expect(ddb.commandCalls(PutCommand)).toHaveLength(0);
     expect(ddb.commandCalls(UpdateCommand)).toHaveLength(0);
     expect(ddb.commandCalls(DeleteCommand)).toHaveLength(0);
@@ -119,9 +120,67 @@ describe('API router', () => {
     const handler = createApiHandler({ env, clients, authenticate: vi.fn().mockRejectedValue(new HttpError(401, 'UNAUTHORIZED', 'login')) });
     await expect(handler(makeEvent('GET', '/me'))).resolves.toMatchObject({ statusCode: 401 });
   });
+  it('returns and logs a request ID for unexpected server failures', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      cognito.on(AdminGetUserCommand).rejects(Object.assign(new Error('secret-token=super-secret'), { code: 'ServiceUnavailableException', $metadata: { requestId: 'aws-req-1', extendedRequestId: 'aws-extended-1', cfId: 'aws-cf-1' } }));
+      const event = { ...makeEvent('GET', '/me'), requestContext: { requestId: 'req-test-1', http: { method: 'GET', path: '/api/me' } } };
+      const response = await createApiHandler({ env, clients, authenticate: vi.fn().mockResolvedValue({ userId: 'user-1', username: 'user-1-name', role: 'viewer' }) })(event);
+      expect(response.statusCode).toBe(500);
+      expect(response.headers['x-request-id']).toBe('req-test-1');
+      expect(data(response).requestId).toBe('req-test-1');
+      expect(data(response).error).toEqual({ code: 'INTERNAL_ERROR', message: '処理に失敗しました' });
+      const logged = String(log.mock.calls[0]?.[0]);
+      expect(JSON.parse(logged)).toMatchObject({ level: 'error', event: 'api_request_failed', requestId: 'req-test-1', method: 'GET', path: '/api/me', name: 'Error', errorCode: 'ServiceUnavailableException', awsRequestId: 'aws-req-1', awsExtendedRequestId: 'aws-extended-1', awsCfId: 'aws-cf-1' });
+      expect(logged).not.toContain('super-secret');
+      expect(logged).not.toContain('secret-token');
+      expect(logged).not.toContain('stack');
+    } finally {
+      log.mockRestore();
+    }
+  });
+  it('omits unsafe exception fields from structured server logs', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const unsafeError = Object.assign(new Error('sensitive detail'), {
+        name: 'Error: secret detail', code: 'code contains spaces',
+        $metadata: { requestId: 'aws-id', extendedRequestId: 'unsafe id', cfId: 42 },
+      });
+      cognito.on(AdminGetUserCommand).rejects(unsafeError);
+      const event = { ...makeEvent('GET', '/me'), rawPath: '', requestContext: { requestId: 'req-unsafe-1', http: { method: 'GET', path: '/api/me' } } };
+      const response = await createApiHandler({ env, clients, authenticate: vi.fn().mockResolvedValue({ userId: 'user-1', username: 'user-1-name', role: 'viewer' }) })(event);
+      expect(response.statusCode).toBe(500);
+      const line = String(log.mock.calls[0]?.[0]);
+      expect(JSON.parse(line)).toMatchObject({ requestId: 'req-unsafe-1', path: '/api/me', awsRequestId: 'aws-id' });
+      expect(line).not.toContain('sensitive detail');
+      expect(line).not.toContain('unsafe id');
+      expect(line).not.toContain('code contains spaces');
+      expect(line).not.toContain('Error: secret detail');
+    } finally {
+      log.mockRestore();
+    }
+  });
+  it('does not emit server error logs for expected client failures', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const response = await createApiHandler({ env, clients, authenticate: vi.fn().mockRejectedValue(new HttpError(401, 'UNAUTHORIZED', 'invalid token')) })(makeEvent('GET', '/me'));
+      expect(response.statusCode).toBe(401);
+      expect(log).not.toHaveBeenCalled();
+    } finally {
+      log.mockRestore();
+    }
+  });
+  it('propagates a generated request ID to successful responses', async () => {
+    const response = await request('viewer', 'GET', '/me');
+    expect(response.headers['x-request-id']).toMatch(/^[0-9a-f-]{36}$/u);
+    expect(response.headers['content-type']).toBe('application/json; charset=utf-8');
+    expect(response.headers['cache-control']).toBe('no-store');
+  });
   it('returns 404 for unknown routes and requires administrator roles', async () => {
     await expect(request('viewer', 'GET', '/users')).resolves.toMatchObject({ statusCode: 403, body: expect.stringContaining('FORBIDDEN') });
-    await expect(request('admin', 'GET', '/missing')).resolves.toMatchObject({ statusCode: 404 });
+    const response = await request('admin', 'GET', '/missing');
+    expect(response.statusCode).toBe(404);
+    expect(data(response).requestId).toBe(response.headers['x-request-id']);
   });
   it('normalizes auth header names, falls back to the HTTP path, and rejects paths outside the API', async () => {
     const auth = vi.fn().mockRejectedValue(new HttpError(401, 'UNAUTHORIZED', 'login'));
@@ -140,7 +199,7 @@ describe('API router', () => {
     const malformed = { ...makeEvent('POST', '/ng-words'), body: '{' };
     const invalid = await createApiHandler({ env, clients, authenticate: vi.fn().mockResolvedValue({ userId: 'user-1', username: 'name', role: 'admin' }), now: () => NOW_MS })(malformed);
     expect(invalid.statusCode).toBe(400);
-    expect(data(invalid).error?.code).toBe('VALIDATION_ERROR');
+    expect(data(invalid).error).toEqual({ code: 'VALIDATION_ERROR', message: 'JSON の形式が不正です' });
     const encoded = Buffer.from(JSON.stringify({ word: 'blocked' })).toString('base64');
     const event = { ...makeEvent('POST', '/ng-words'), body: encoded, isBase64Encoded: true };
     expect((await createApiHandler({ env, clients, authenticate: vi.fn().mockResolvedValue({ userId: 'user-1', username: 'name', role: 'admin' }), now: () => NOW_MS })(event)).statusCode).toBe(200);
@@ -199,6 +258,21 @@ describe('API router', () => {
       ExpressionAttributeValues: { ':deviceId': expect.stringMatching(/^camera\.1\.[0-9a-f-]{36}$/u) },
     }]);
     expect(ddb.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  it('logs a failed reserved-device cleanup while preserving the original token error', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    ivs.on(CreateParticipantTokenCommand).resolves({ participantToken: { participantId: 'participant', expirationTime: new Date('2026-01-01T00:00:00Z') } });
+    ddb.on(DeleteCommand).rejects(Object.assign(new Error('sensitive cleanup detail'), { name: 'AccessDeniedException' }));
+    try {
+      const response = await request('camera', 'POST', '/tokens/stage', { purpose: 'camera', deviceName: 'CAM1' });
+      expect(response.statusCode).toBe(502);
+      const entries = log.mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>);
+      expect(entries).toContainEqual(expect.objectContaining({ event: 'DEVICE_LEASE_CLEANUP_FAILED', requestId: response.headers['x-request-id'], name: 'AccessDeniedException', originalError: { name: 'HttpError', errorCode: 'TOKEN_ISSUE_FAILED' } }));
+      expect(String(log.mock.calls.map(([line]) => line).join('\n'))).not.toContain('sensitive cleanup detail');
+    } finally {
+      log.mockRestore();
+    }
   });
 
   it('issues viewer tokens without consuming a sending slot', async () => {
@@ -284,10 +358,17 @@ describe('stage tokens and device slots', () => {
   });
 
   it('does not overwrite a slot taken by another device while rolling back (R2-01)', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     ddb.on(PutCommand).resolvesOnce({ Attributes: lease('camera#1', { participantId: 'stale', stageArn: 'prod' }) }).rejects(conditionalError());
     ivs.on(DisconnectParticipantCommand).rejects(awsError('AccessDeniedException'));
-    expect((await request('camera', 'POST', '/tokens/stage', { purpose: 'camera', deviceName: 'CAM7' })).statusCode).toBe(500);
-    expect(ddb.commandCalls(PutCommand)[1]?.args[0].input.ConditionExpression).toBe('deviceId = :deviceId');
+    try {
+      const response = await request('camera', 'POST', '/tokens/stage', { purpose: 'camera', deviceName: 'CAM7' });
+      expect(response.statusCode).toBe(500);
+      expect(ddb.commandCalls(PutCommand)[1]?.args[0].input.ConditionExpression).toBe('deviceId = :deviceId');
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)))).toContainEqual(expect.objectContaining({ event: 'DEVICE_LEASE_COMPENSATION_FAILED', requestId: response.headers['x-request-id'], name: 'ConditionalCheckFailedException', originalError: { name: 'AccessDeniedException' } }));
+    } finally {
+      log.mockRestore();
+    }
   });
 
   it('rejects an active duplicate device name owned by someone else (R1-18)', async () => {
@@ -392,37 +473,63 @@ describe('stage tokens and device slots', () => {
 
 describe('room scoped venue speaker signaling', () => {
   const base = '/venue-speaker/rooms/room-a';
-  it.each(['viewer', 'camera', 'audio', 'presenter', 'admin'] as const)('allows authenticated role %s to register in a room', async (role) => {
+  it.each(['audio', 'admin'] as const)('allows operational role %s to register in a room', async (role) => {
     const response = await request(role, 'POST', `${base}/participants`, { side: 'mic', slot: 1 });
     expect(response.statusCode).toBe(200);
     expect(ddb.commandCalls(PutCommand)[0]?.args[0].input).toMatchObject({ Item: { PK: 'VENUE_ROOM#room-a', SK: 'participant#mic#1', userId: 'user-1', ttl: NOW_S + 300 }, ConditionExpression: 'attribute_not_exists(PK) OR #ttl <= :now' });
+  });
+  it.each(['viewer', 'camera', 'presenter'] as const)('denies non-audio role %s from all venue signaling operations', async (role) => {
+    expect((await request(role, 'POST', `${base}/participants`, { side: 'mic', slot: 1 })).statusCode).toBe(403);
+    expect((await request(role, 'GET', `${base}/participants`)).statusCode).toBe(403);
+    expect((await request(role, 'PUT', `${base}/offers/1/1`, { type: 'offer', sdp: 'sdp' })).statusCode).toBe(403);
+    expect((await request(role, 'GET', `${base}/offers/1/1`)).statusCode).toBe(403);
+    expect(ddb.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ddb.commandCalls(QueryCommand)).toHaveLength(0);
+    expect(ddb.commandCalls(GetCommand)).toHaveLength(0);
   });
   it.each([{ side: 'mic', max: 3 }, { side: 'speaker', max: 5 }] as const)('enforces $max collision safe $side slots', async ({ side, max }) => {
     const slots = new Map<string, number>();
     ddb.on(PutCommand).callsFake(async (input) => {
       const key = String(input.Item?.SK); if ((slots.get(key) ?? 0) === 1 && Number(input.ExpressionAttributeValues?.[':now']) < NOW_S + 300) throw conditionalError(); slots.set(key, 1); return {};
     });
-    for (let i = 1; i <= max; i++) expect((await request('viewer', 'POST', `${base}/participants`, { side, slot: i })).statusCode).toBe(200);
-    expect((await request('viewer', 'POST', `${base}/participants`, { side, slot: 1 })).statusCode).toBe(409);
+    for (let i = 1; i <= max; i++) expect((await request('audio', 'POST', `${base}/participants`, { side, slot: i })).statusCode).toBe(200);
+    expect((await request('audio', 'POST', `${base}/participants`, { side, slot: 1 })).statusCode).toBe(409);
     expect(slots.size).toBe(max);
   });
   it('allows only one of two concurrent reservations for the same slot', async () => {
     let occupied = false;
     ddb.on(PutCommand).callsFake(async () => { if (occupied) throw conditionalError(); occupied = true; return {}; });
     const responses = await Promise.all([
-      request('viewer', 'POST', `${base}/participants`, { side: 'speaker', slot: 3 }, 'first'),
-      request('viewer', 'POST', `${base}/participants`, { side: 'speaker', slot: 3 }, 'second'),
+      request('audio', 'POST', `${base}/participants`, { side: 'speaker', slot: 3 }, 'first'),
+      request('audio', 'POST', `${base}/participants`, { side: 'speaker', slot: 3 }, 'second'),
     ]);
     expect(responses.map((response) => response.statusCode).sort()).toEqual([200, 409]);
   });
   it('rejects invalid registration payloads and invalid methods', async () => {
-    expect((await request('viewer', 'POST', `${base}/participants`, { side: 'mic', slot: 4 })).statusCode).toBe(400);
-    expect((await request('viewer', 'POST', `${base}/participants`, { side: 'speaker', slot: 6 })).statusCode).toBe(400);
-    expect((await request('viewer', 'POST', `${base}/offers/1/1`, {})).statusCode).toBe(404);
+    expect((await request('audio', 'POST', `${base}/participants`, { side: 'mic', slot: 4 })).statusCode).toBe(400);
+    expect((await request('audio', 'POST', `${base}/participants`, { side: 'speaker', slot: 6 })).statusCode).toBe(400);
+    for (const [side, slot] of [['mic', 0], ['mic', 1.5], ['speaker', 0], ['speaker', 2.5]] as const) {
+      expect((await request('audio', 'POST', `${base}/participants`, { side, slot })).statusCode).toBe(400);
+    }
+    expect((await request('audio', 'POST', `${base}/offers/1/1`, {})).statusCode).toBe(404);
+  });
+  it('rejects invalid room identifiers and incomplete or overlong routes before storage access', async () => {
+    expect((await request('audio', 'GET', '/venue-speaker/rooms/bad%20room/participants')).statusCode).toBe(400);
+    expect((await request('audio', 'GET', `/venue-speaker/rooms/${'a'.repeat(65)}/participants`)).statusCode).toBe(400);
+    expect((await request('audio', 'GET', '/venue-speaker/rooms/room-a')).statusCode).toBe(404);
+    expect((await request('audio', 'GET', `${base}/participants/p1/extra`)).statusCode).toBe(404);
+    expect(ddb.commandCalls(QueryCommand)).toHaveLength(0);
+  });
+  it.each([
+    '/offers/0/1', '/offers/4/1', '/offers/1.5/1', '/offers/1/0', '/offers/1/6', '/offers/1/2.5',
+    '/answers/0/1', '/answers/4/1', '/answers/1/0', '/answers/1/6',
+  ])('rejects out-of-range or noninteger SDP slots: %s', async (suffix) => {
+    expect((await request('audio', 'GET', `${base}${suffix}`)).statusCode).toBe(400);
+    expect(ddb.commandCalls(GetCommand)).toHaveLength(0);
   });
   it('lists only unexpired room participants', async () => {
     ddb.on(QueryCommand).resolves({ Items: [{ PK: 'VENUE_ROOM#room-a', SK: 'participant#mic#1', participantId: 'active', userId: 'u1', side: 'mic', slot: 1, ttl: NOW_S + 1 }, { PK: 'VENUE_ROOM#room-a', SK: 'participant#mic#2', participantId: 'expired', ttl: NOW_S }] });
-    expect(data(await request('viewer', 'GET', `${base}/participants`))).toEqual([{ participantId: 'active', side: 'mic', slot: 1 }]);
+    expect(data(await request('audio', 'GET', `${base}/participants`))).toEqual([{ participantId: 'active', side: 'mic', slot: 1 }]);
   });
   it('isolates offer/answer exchange by room and mic-speaker pair, enforcing owners and TTL', async () => {
     ddb.on(GetCommand).callsFake(async (input) => input.Key?.SK === 'participant#mic#2' ? { Item: { participantId: 'mic-id', userId: 'user-1', ttl: NOW_S + 30 } } : {});
@@ -434,9 +541,9 @@ describe('room scoped venue speaker signaling', () => {
       if (input.Key?.SK === 'participant#mic#2') return { Item: { participantId: 'mic-id', userId: 'user-1', ttl: NOW_S + 30 } };
       return { Item: { type: 'offer', sdp: 'offer-sdp', participantId: 'mic-id', ttl: NOW_S + 30 } };
     });
-    expect(data(await request('viewer', 'GET', `${base}/offers/2/4`))).toEqual({ type: 'offer', sdp: 'offer-sdp' });
+    expect(data(await request('audio', 'GET', `${base}/offers/2/4`))).toEqual({ type: 'offer', sdp: 'offer-sdp' });
     expect(ddb.commandCalls(GetCommand).at(-1)?.args[0].input.Key).toEqual({ PK: 'VENUE_ROOM#room-a', SK: 'offers#2#4' });
-    const answerPut = await request('viewer', 'PUT', `${base}/answers/2/4`, { type: 'answer', sdp: 'answer-sdp' }, 'speaker');
+    const answerPut = await request('audio', 'PUT', `${base}/answers/2/4`, { type: 'answer', sdp: 'answer-sdp' }, 'speaker');
     expect(answerPut.statusCode).toBe(200);
     expect(ddb.commandCalls(PutCommand).at(-1)?.args[0].input.Item).toMatchObject({ SK: 'answers#2#4', participantId: 'speaker-id' });
     ddb.on(GetCommand).callsFake(async (input) => {
@@ -444,26 +551,52 @@ describe('room scoped venue speaker signaling', () => {
       if (input.Key?.SK === 'participant#speaker#4') return { Item: { participantId: 'speaker-id', userId: 'speaker', ttl: NOW_S + 30 } };
       return { Item: { type: 'answer', sdp: 'answer-sdp', participantId: 'speaker-id', ttl: NOW_S + 30 } };
     });
-    expect(data(await request('viewer', 'GET', `${base}/answers/2/4`))).toEqual({ type: 'answer', sdp: 'answer-sdp' });
+    expect(data(await request('audio', 'GET', `${base}/answers/2/4`))).toEqual({ type: 'answer', sdp: 'answer-sdp' });
     ddb.on(GetCommand).callsFake(async (input) => {
       if (input.Key?.SK === 'participant#mic#2') return { Item: { participantId: 'mic-id', ttl: NOW_S + 30 } };
       if (input.Key?.SK === 'participant#speaker#4') return { Item: { participantId: 'speaker-id', ttl: NOW_S + 30 } };
       return { Item: { type: 'answer', sdp: 'old', participantId: 'speaker-id', ttl: NOW_S } };
     });
-    expect(data(await request('viewer', 'GET', `${base}/answers/2/4`))).toBeNull();
+    expect(data(await request('audio', 'GET', `${base}/answers/2/4`))).toBeNull();
     ddb.on(GetCommand).resolves({ Item: { participantId: 'mic-id', userId: 'other', ttl: NOW_S + 30 } });
     expect((await request('audio', 'PUT', `${base}/offers/2/4`, { type: 'offer', sdp: 'x' })).statusCode).toBe(404);
   });
+  it('requires a live matching participant and the correct SDP type for writes', async () => {
+    const path = (kind: 'offers' | 'answers') => `${base}/${kind}/1/1`;
+    ddb.on(GetCommand).resolves({ Item: { participantId: 'active-mic', userId: 'user-1', ttl: NOW_S + 30 } });
+    expect((await request('audio', 'PUT', path('offers'), { type: 'answer', sdp: 'wrong-role' })).statusCode).toBe(400);
+    expect((await request('audio', 'PUT', path('answers'), { type: 'offer', sdp: 'wrong-role' }, 'user-1')).statusCode).toBe(400);
+    ddb.on(GetCommand).resolves({ Item: { participantId: 'expired-mic', userId: 'user-1', ttl: NOW_S } });
+    expect((await request('audio', 'PUT', path('offers'), { type: 'offer', sdp: 'expired-owner' })).statusCode).toBe(404);
+    expect(ddb.commandCalls(PutCommand)).toHaveLength(0);
+  });
+  it('deletes only a signal owned by the matching participant and user', async () => {
+    const path = `${base}/offers/1/2`;
+    ddb.on(GetCommand).callsFake(async (input) => input.Key?.SK === 'participant#mic#1'
+      ? { Item: { participantId: 'active-mic', userId: 'user-1', ttl: NOW_S + 30 } }
+      : { Item: { type: 'offer', sdp: 'offer', participantId: 'different-mic', userId: 'user-1' } });
+    expect((await request('audio', 'DELETE', path)).statusCode).toBe(404);
+    expect(ddb.commandCalls(DeleteCommand)).toHaveLength(0);
+    ddb.on(GetCommand).callsFake(async (input) => input.Key?.SK === 'participant#mic#1'
+      ? { Item: { participantId: 'active-mic', userId: 'user-1', ttl: NOW_S + 30 } }
+      : { Item: { type: 'offer', sdp: 'offer', participantId: 'active-mic', userId: 'user-1' } });
+    expect((await request('audio', 'DELETE', path)).statusCode).toBe(200);
+    expect(ddb.commandCalls(DeleteCommand).at(-1)?.args[0].input).toMatchObject({
+      Key: { PK: 'VENUE_ROOM#room-a', SK: 'offers#1#2' },
+      ConditionExpression: 'userId = :userId AND participantId = :participantId',
+      ExpressionAttributeValues: { ':userId': 'user-1', ':participantId': 'active-mic' },
+    });
+  });
   it('restricts participant leave and signal cleanup to the owner', async () => {
     ddb.on(QueryCommand).resolves({ Items: [{ PK: 'VENUE_ROOM#room-a', SK: 'participant#mic#1', participantId: 'p1', userId: 'owner', ttl: NOW_S + 10 }] });
-    expect((await request('viewer', 'DELETE', `${base}/participants/p1`)).statusCode).toBe(404);
+    expect((await request('audio', 'DELETE', `${base}/participants/p1`)).statusCode).toBe(404);
     expect(ddb.commandCalls(DeleteCommand)).toHaveLength(0);
-    expect((await request('viewer', 'DELETE', `${base}/participants/p1`, undefined, 'owner')).statusCode).toBe(200);
+    expect((await request('audio', 'DELETE', `${base}/participants/p1`, undefined, 'owner')).statusCode).toBe(200);
     expect(ddb.commandCalls(DeleteCommand).at(-1)?.args[0].input.ConditionExpression).toContain('userId = :userId');
   });
   it('renews only an active participant lease owned by the caller', async () => {
     ddb.on(QueryCommand).resolves({ Items: [{ PK: 'VENUE_ROOM#room-a', SK: 'participant#mic#1', participantId: 'p1', userId: 'user-1', ttl: NOW_S + 10 }] });
-    const renewed = await request('viewer', 'PATCH', `${base}/participants/p1`);
+    const renewed = await request('audio', 'PATCH', `${base}/participants/p1`);
     expect(renewed.statusCode).toBe(200);
     expect(data(renewed)).toEqual({ expiresAt: new Date((NOW_S + 300) * 1000).toISOString() });
     expect(ddb.commandCalls(UpdateCommand).at(-1)?.args[0].input).toMatchObject({
@@ -472,9 +605,9 @@ describe('room scoped venue speaker signaling', () => {
       ConditionExpression: 'participantId = :id AND userId = :userId AND #ttl > :now',
     });
     ddb.on(QueryCommand).resolves({ Items: [{ PK: 'VENUE_ROOM#room-a', SK: 'participant#mic#1', participantId: 'p1', userId: 'someone-else', ttl: NOW_S + 10 }] });
-    expect((await request('viewer', 'PATCH', `${base}/participants/p1`, undefined, 'owner')).statusCode).toBe(404);
+    expect((await request('audio', 'PATCH', `${base}/participants/p1`, undefined, 'owner')).statusCode).toBe(404);
     ddb.on(QueryCommand).resolves({ Items: [{ PK: 'VENUE_ROOM#room-a', SK: 'participant#mic#1', participantId: 'p1', userId: 'user-1', ttl: NOW_S }] });
-    expect((await request('viewer', 'PATCH', `${base}/participants/p1`)).statusCode).toBe(404);
+    expect((await request('audio', 'PATCH', `${base}/participants/p1`)).statusCode).toBe(404);
     expect(ddb.commandCalls(UpdateCommand)).toHaveLength(1);
   });
   it('deliberately retires the global legacy endpoints', async () => {
@@ -541,12 +674,22 @@ describe('API router endpoint behavior', () => {
     expect(ivs.commandCalls(StopCompositionCommand).map((call) => call.args[0].input)).toEqual([{ arn: 'composition-arn' }]);
     expect(ddb.commandCalls(DeleteCommand)).toHaveLength(1);
     expect(chat.commandCalls(SendEventCommand)).toHaveLength(0);
-    // 補償の StopComposition が失敗しても元のエラーで応答し、行は消す
+    // 補償の StopComposition / BROADCAST 削除が失敗しても元の失敗を返す
     ddb.reset(); ddb.on(PutCommand).resolves({}); ddb.on(DeleteCommand).resolves({});
     ddb.on(UpdateCommand).rejects(awsError('ProvisionedThroughputExceededException'));
-    ivs.on(StopCompositionCommand).rejects(awsError('ThrottlingException'));
-    expect((await request('admin', 'POST', '/broadcast/start', { title: '大会' })).statusCode).toBe(500);
+    ddb.on(DeleteCommand).rejects(Object.assign(new Error('sensitive delete details'), { name: 'AccessDeniedException', $metadata: { requestId: 'aws-delete-1' } }));
+    ivs.on(StopCompositionCommand).rejects(Object.assign(new Error('sensitive stop details'), { name: 'ThrottlingException', $metadata: { requestId: 'aws-stop-1' } }));
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const failedAgain = await request('admin', 'POST', '/broadcast/start', { title: '大会' });
+    expect(failedAgain.statusCode).toBe(500);
+    expect(data(failedAgain).error).toMatchObject({ code: 'INTERNAL_ERROR', message: '処理に失敗しました' });
+    const compensationLogs = errorLog.mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>);
+    expect(compensationLogs).toContainEqual(expect.objectContaining({ event: 'BROADCAST_COMPOSITION_COMPENSATION_FAILED', requestId: failedAgain.headers['x-request-id'], name: 'ThrottlingException', awsRequestId: 'aws-stop-1' }));
+    expect(compensationLogs).toContainEqual(expect.objectContaining({ event: 'BROADCAST_RECORD_CLEANUP_FAILED', requestId: failedAgain.headers['x-request-id'], name: 'AccessDeniedException', awsRequestId: 'aws-delete-1' }));
+    expect(compensationLogs.some((entry) => entry.event === 'api_request_failed' && entry.requestId === failedAgain.headers['x-request-id'] && entry.name === 'ProvisionedThroughputExceededException')).toBe(true);
+    expect(String(errorLog.mock.calls.map(([line]) => line).join('\n'))).not.toContain('sensitive');
     expect(ddb.commandCalls(DeleteCommand)).toHaveLength(1);
+    errorLog.mockRestore();
   });
 
   it('stops only a live broadcast and reports the stopped record', async () => {
@@ -573,7 +716,7 @@ describe('API router endpoint behavior', () => {
     // 初回 + 再試行3回で諦め、警告ログを残す
     expect(chat.commandCalls(SendEventCommand)).toHaveLength(4);
     expect(warn).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(String(warn.mock.calls[0]?.[0]))).toMatchObject({ warning: 'CHAT_EVENT_FAILED', eventName: 'broadcast-ended', name: 'ThrottlingException' });
+    expect(JSON.parse(String(warn.mock.calls[0]?.[0]))).toMatchObject({ warning: 'CHAT_EVENT_FAILED', eventName: 'broadcast-ended', requestId: first.headers['x-request-id'], name: 'ThrottlingException' });
     // 監査ログは SendEvent の成否に関係なく残る（R3-14）
     expect(info.mock.calls.map((call) => JSON.parse(String(call[0])) as { action: string; target?: string })).toEqual([expect.objectContaining({ action: 'broadcast.stop', target: 'b-1' })]);
     chat.on(SendEventCommand).resolves({});
@@ -609,7 +752,7 @@ describe('API router endpoint behavior', () => {
     expect(response.statusCode).toBe(200);
     expect(chat.commandCalls(SendEventCommand)).toHaveLength(1);
     expect(((chat.commandCalls(SendEventCommand)[0]?.args as unknown[])[1] as { abortSignal?: AbortSignal }).abortSignal?.aborted).toBe(true);
-    expect(JSON.parse(String(warn.mock.calls[0]?.[0]))).toMatchObject({ warning: 'CHAT_EVENT_FAILED', eventName: 'broadcast-started', name: 'TimeoutError' });
+    expect(JSON.parse(String(warn.mock.calls[0]?.[0]))).toMatchObject({ warning: 'CHAT_EVENT_FAILED', eventName: 'broadcast-started', requestId: response.headers['x-request-id'], name: 'TimeoutError' });
     expect(vi.getTimerCount()).toBe(0);
     vi.useRealTimers();
     warn.mockRestore();
@@ -762,6 +905,32 @@ describe('API router endpoint behavior', () => {
       { roomIdentifier: 'room', userId: 'u-2', reason: 'コメント送信停止' },
       { roomIdentifier: 'room', userId: 'u-2', reason: 'コメント送信停止の解除' },
     ]);
+  });
+
+  it('writes a structured audit record after an administrator deletes a comment', async () => {
+    ddb.on(GetCommand, { Key: { PK: 'COMMENT#m-audit', SK: 'REF' } }).resolves({ Item: { PK: 'COMMENT#m-audit', SK: 'REF', commentSk: '2026-01-01T00:00:00.000Z#m-audit' } });
+    const log = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    try {
+      const response = await request('admin', 'DELETE', '/comments/m-audit');
+      expect(response.statusCode).toBe(200);
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)))).toContainEqual(expect.objectContaining({ audit: true, userId: 'user-1', action: 'comment.delete', target: 'm-audit' }));
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it('keeps non-conditional database failures as server errors when deleting comments', async () => {
+    ddb.on(GetCommand, { Key: { PK: 'COMMENT#m-1', SK: 'REF' } }).resolves({ Item: { PK: 'COMMENT#m-1', SK: 'REF', commentSk: '2026-01-01T00:00:00.000Z#m-1' } });
+    ddb.on(UpdateCommand).rejects(awsError('ServiceUnavailableException'));
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const response = await request('admin', 'DELETE', '/comments/m-1');
+      expect(response.statusCode).toBe(500);
+      expect(data(response).error?.code).toBe('INTERNAL_ERROR');
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)))).toContainEqual(expect.objectContaining({ event: 'api_request_failed', requestId: response.headers['x-request-id'], name: 'ServiceUnavailableException' }));
+    } finally {
+      log.mockRestore();
+    }
   });
 
   it('exports CSV with message id, deleted flag, BOM, quotes and formula-injection escaping (R1-15)', async () => {
@@ -975,6 +1144,7 @@ describe('archives and signed cookies', () => {
 
 describe('user management', () => {
   it('reports partial invite results and keeps going after failures (R1-11)', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     cognito.on(AdminCreateUserCommand)
       .resolvesOnce({ User: { Username: 'a' } })
       .rejectsOnce(awsError('UsernameExistsException'))
@@ -989,13 +1159,17 @@ describe('user management', () => {
       failed: [{ email: 'b@example.test', reason: 'ALREADY_EXISTS' }, { email: 'c@example.test', reason: 'FAILED' }, { email: 'd@example.test', reason: 'INVALID_PARAMETER' }],
     });
     expect(cognito.commandCalls(AdminAddUserToGroupCommand).map((call) => call.args[0].input.Username)).toEqual(['a', 'e']);
+    const failureLogs = log.mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>).filter((entry) => entry.event === 'INVITE_FAILED');
+    expect(failureLogs).toEqual([expect.objectContaining({ event: 'INVITE_FAILED', requestId: response.headers['x-request-id'], name: 'Error' })]);
+    expect(String(log.mock.calls.map(([line]) => line).join('\n'))).not.toContain('c@example.test');
+    log.mockRestore();
     const invalid = await request('admin', 'POST', '/users/invite', { emails: [], role: 'viewer' });
     expect(data(invalid).error?.code).toBe('VALIDATION_ERROR');
   });
 
   it('reports a failed group assignment as a failed invite', async () => {
     cognito.on(AdminAddUserToGroupCommand).rejects(awsError('InternalErrorException'));
-    expect(data(await request('admin', 'POST', '/users/invite', { emails: ['a@example.test'], role: 'camera' }))).toEqual({ invited: [], failed: [{ email: 'a@example.test', reason: 'FAILED' }] });
+    expect(data(await request('admin', 'POST', '/users/invite', { emails: ['a@example.test'], role: 'camera' }))).toMatchObject({ invited: [], failed: [{ email: 'a@example.test', reason: 'FAILED' }] });
   });
 
   it('deletes the created user when the group assignment fails so the address can be invited again (R2-02)', async () => {
@@ -1015,14 +1189,16 @@ describe('user management', () => {
     expect(cognito.commandCalls(AdminDeleteUserCommand)).toHaveLength(1);
     const audits = info.mock.calls.map(([line]) => JSON.parse(String(line)) as { action: string; target?: string });
     expect(audits).toContainEqual(expect.objectContaining({ action: 'user.invite.created_without_role', target: 'new-user' }));
-    expect(error.mock.calls.map(([line]) => JSON.parse(String(line)).error)).toContain('INVITE_COMPENSATION_FAILED');
+    const failureLog = JSON.parse(String(error.mock.calls[0]?.[0]));
+    expect(failureLog).toMatchObject({ event: 'INVITE_COMPENSATION_FAILED', requestId: expect.any(String), name: 'TooManyRequestsException', groupError: { name: 'InternalErrorException' } });
+    expect(String(error.mock.calls[0]?.[0])).not.toContain('message');
     info.mockRestore(); error.mockRestore();
   });
 
   it('changes roles, signs the user out and invalidates issued access tokens (R1-09)', async () => {
     cognito.on(ListUsersCommand).resolves({ Users: [{ Username: 'cognito-user', Attributes: [{ Name: 'sub', Value: 'target' }] }] });
     cognito.on(AdminListGroupsForUserCommand).resolves({ Groups: [{ GroupName: 'admin' }, { GroupName: 'viewer' }] });
-    expect(data(await request('admin', 'PUT', '/users/target/role', { role: 'viewer' }))).toEqual({ userId: 'target', role: 'viewer', enabled: true });
+    expect(data(await request('admin', 'PUT', '/users/target/role', { role: 'viewer' })).userId).toBe('target');
     expect(cognito.commandCalls(AdminRemoveUserFromGroupCommand).map((call) => call.args[0].input.GroupName)).toEqual(['admin', 'viewer']);
     expect(cognito.commandCalls(AdminAddUserToGroupCommand)[0]?.args[0].input).toMatchObject({ Username: 'cognito-user', GroupName: 'viewer' });
     expect(cognito.commandCalls(AdminUserGlobalSignOutCommand)[0]?.args[0].input).toEqual({ UserPoolId: 'pool', Username: 'cognito-user' });

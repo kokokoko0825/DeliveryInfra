@@ -5,8 +5,23 @@ import type { StageSessionHandlers, StageSessionOptions } from './stage';
 export class FakeTrack extends EventTarget {
   readyState: 'live' | 'ended' = 'live';
   contentHint = '';
+  sourceId: string;
+  appliedConstraints: MediaTrackConstraints = {};
   stop = vi.fn(() => { this.readyState = 'ended'; });
-  constructor(public kind: 'audio' | 'video', public id = `${kind}-${Math.random().toString(36).slice(2, 8)}`) { super(); }
+  applyConstraints = vi.fn(async (constraints: MediaTrackConstraints) => { this.appliedConstraints = constraints; });
+  getSettings = vi.fn(() => ({
+    deviceId: this.sourceId,
+    echoCancellation: this.appliedConstraints.echoCancellation ?? true,
+    noiseSuppression: this.appliedConstraints.noiseSuppression ?? true,
+    autoGainControl: this.appliedConstraints.autoGainControl ?? true,
+  }));
+  clone = vi.fn(() => {
+    const clone = new FakeTrack(this.kind, this.id);
+    clone.sourceId = this.sourceId;
+    clone.appliedConstraints = { ...this.appliedConstraints };
+    return clone;
+  });
+  constructor(public kind: 'audio' | 'video', public id = `${kind}-${Math.random().toString(36).slice(2, 8)}`) { super(); this.sourceId = id; }
   end() {
     this.readyState = 'ended';
     this.dispatchEvent(new Event('ended'));

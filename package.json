@@ -3,13 +3,16 @@
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.15.0",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "typecheck": "pnpm -r typecheck",
     "lint": "pnpm -r lint",
     "test": "pnpm -r test",
     "test:integration": "pnpm --filter integration-tests test",
-    "mutation": "pnpm -r mutation",
+    "mutation": "node scripts/run-changed-mutation.mjs",
+    "mutation:all": "pnpm -r --workspace-concurrency=1 mutation",
     "format": "prettier --write ."
   },
   "devDependencies": {

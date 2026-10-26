@@ -3,6 +3,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import VenueMicPage from './VenueMicPage';
 import VenueSpeakerPage from './VenueSpeakerPage';
 import type { VenueSession, VenueSessionMetrics } from './venueAudio';
+import { clearClientDiagnostics, listClientDiagnostics } from '@/lib/diagnostics';
+
+function memoryStorage(): Storage {
+  const values = new Map<string, string>();
+  return {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => { values.set(key, value); },
+    removeItem: (key) => { values.delete(key); },
+    clear: () => values.clear(),
+    key: (index) => [...values.keys()][index] ?? null,
+    get length() { return values.size; },
+  };
+}
 
 const mocks = vi.hoisted(() => ({
   startMic: vi.fn(), startSpeaker: vi.fn(), prepareSpeakerAudio: vi.fn(), createRun: vi.fn(), appendRecord: vi.fn(), endRun: vi.fn(),
@@ -22,7 +35,7 @@ const snapshot: VenueSessionMetrics = {
   role: 'mic', slot: 2, transport: 'pcm', activePeers: 1, connectedPeers: 1,
   sentPackets: 12, sentBytes: 11520, backpressureDrops: 1, receivedPackets: 4, receivedBytes: 3840,
   sequenceGaps: 2, duplicates: 3, invalidPackets: 4, rttMs: 21.5,
-  peers: [{ peerId: 'peer-1', side: 'speaker', slot: 1, micSlot: 2, speakerSlot: 1, active: true, state: 'connected', connected: true, sentPackets: 5, sentBytes: 4800, backpressureDrops: 1, receivedPackets: 2, receivedBytes: 1920, sequenceGaps: 1, duplicates: 2, invalidPackets: 3, rttMs: 22 }],
+  peers: [{ peerId: 'peer-1', side: 'speaker', slot: 1, micSlot: 2, speakerSlot: 1, active: true, state: 'connected', iceState: 'connected', iceGatheringState: 'complete', signalingState: 'stable', connected: true, sentPackets: 5, sentBytes: 4800, backpressureDrops: 1, receivedPackets: 2, receivedBytes: 1920, sequenceGaps: 1, duplicates: 2, invalidPackets: 3, rttMs: 22 }],
   workletStreams: [{ micId: 'MIC2', queuedMs: 10, underflows: 5, overflows: 6, dropped: 7, peak: 0.8 }],
 };
 
@@ -41,6 +54,8 @@ function setupMedia() {
 describe('venue PoC pages', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubGlobal('localStorage', memoryStorage());
+    clearClientDiagnostics();
     mocks.createRun.mockResolvedValue(undefined);
     mocks.appendRecord.mockResolvedValue(true);
     mocks.endRun.mockResolvedValue(undefined);
@@ -91,11 +106,26 @@ describe('venue PoC pages', () => {
     mocks.exportRun.mockRejectedValueOnce(new Error('corrupt run'));
     fireEvent.click(screen.getAllByRole('button', { name: 'JSON manifest' })[1]!);
     expect(await screen.findByRole('alert')).toHaveTextContent('corrupt run');
+    expect(listClientDiagnostics()).toMatchObject([{ source: 'venue.run-log.export', context: { phase: 'export', side: 'mic', format: 'json' } }]);
+  });
+
+  it('records a run-finalization failure when stopping the mic session', async () => {
+    const { stream } = setupMedia();
+    mocks.startMic.mockResolvedValue(fakeSession('mic', 1));
+    render(<VenueMicPage />);
+    fireEvent.click(screen.getByRole('button', { name: '接続開始' }));
+    await waitFor(() => expect(mocks.startMic).toHaveBeenCalledWith(stream, { transport: 'pcm' }));
+    mocks.endRun.mockRejectedValueOnce(new Error('IndexedDB finalize failed'));
+
+    fireEvent.click(screen.getByRole('button', { name: '停止' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('ランを終了保存できませんでした');
+    expect(listClientDiagnostics()).toMatchObject([{ source: 'venue.run-log.end', context: { phase: 'stop', side: 'mic' } }]);
   });
 
   it('selects a speaker slot, displays diagnostic RTT and reports IndexedDB start errors', async () => {
     mocks.startSpeaker.mockResolvedValue(fakeSession('speaker', 3));
     const { rerender } = render(<VenueSpeakerPage />);
+    expect(screen.getByText(/消音モードを解除/)).toBeInTheDocument();
     fireEvent.change(screen.getByRole('combobox', { name: 'スピーカースロット' }), { target: { value: '3' } });
     fireEvent.click(screen.getByRole('button', { name: '受信開始' }));
     await waitFor(() => expect(mocks.startSpeaker).toHaveBeenCalledWith(expect.any(Function), { transport: 'pcm', slot: 3 }, expect.any(Object)));
@@ -108,6 +138,7 @@ describe('venue PoC pages', () => {
     rerender(<VenueSpeakerPage />);
     fireEvent.click(screen.getByRole('button', { name: '受信開始' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('IndexedDB unavailable');
+    expect(listClientDiagnostics()).toMatchObject([{ source: 'venue.session', context: { phase: 'start', side: 'speaker' } }]);
   });
 
   it('uses Auto by default and explains iOS microphone permission failures', async () => {
@@ -117,6 +148,7 @@ describe('venue PoC pages', () => {
     expect(screen.getByRole('combobox', { name: 'マイクスロット' })).toHaveValue('auto');
     fireEvent.click(screen.getByRole('button', { name: '接続開始' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('設定アプリでブラウザのマイク権限を許可');
+    expect(listClientDiagnostics()).toMatchObject([{ source: 'venue.session', context: { phase: 'start', side: 'mic' } }]);
     expect(mocks.startMic).not.toHaveBeenCalled();
     await waitFor(() => expect(mocks.endRun).toHaveBeenCalled());
   });
@@ -134,5 +166,39 @@ describe('venue PoC pages', () => {
     const createdRun = mocks.createRun.mock.calls[0]?.[0];
     expect(mocks.saveBlob.mock.calls[0]?.[1]).toBe(`venue-run-${createdRun.id}-acoustic.webm`);
     expect(screen.getByText(/校正された遅延測定ではありません/)).toBeInTheDocument();
+  });
+
+  it('records microphone recording start and stop failures in common diagnostics', async () => {
+    setupMedia();
+    mocks.startMic.mockResolvedValue(fakeSession('mic', 1));
+    mocks.createRecorder.mockReturnValue({ start: () => { throw new Error('recorder start failed'); }, stop: vi.fn(), cleanup: vi.fn() });
+    render(<VenueMicPage />);
+    fireEvent.click(screen.getByRole('button', { name: '接続開始' }));
+    expect(await screen.findByRole('region', { name: '音響証拠録音' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '音響証拠を録音' }));
+    expect(listClientDiagnostics()).toMatchObject([{ source: 'venue.recording', context: { phase: 'start', side: 'mic' } }]);
+    expect(screen.getByRole('alert')).toHaveTextContent('recorder start failed');
+  });
+
+  it('records microphone recording stop failures in common diagnostics', async () => {
+    setupMedia();
+    mocks.startMic.mockResolvedValue(fakeSession('mic', 1));
+    mocks.createRecorder.mockReturnValue({ start: vi.fn(), stop: vi.fn().mockRejectedValue(new Error('recorder stop failed')), cleanup: vi.fn() });
+    render(<VenueMicPage />);
+    fireEvent.click(screen.getByRole('button', { name: '接続開始' }));
+    expect(await screen.findByRole('region', { name: '音響証拠録音' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '音響証拠を録音' }));
+    fireEvent.click(screen.getByRole('button', { name: '録音停止して保存' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('recorder stop failed');
+    expect(listClientDiagnostics()).toMatchObject([{ source: 'venue.recording', context: { phase: 'stop', side: 'mic' } }]);
+  });
+
+  it('keeps an intentional speaker start abort quiet', async () => {
+    mocks.startSpeaker.mockRejectedValue(new DOMException('closed', 'AbortError'));
+    render(<VenueSpeakerPage />);
+    fireEvent.click(screen.getByRole('button', { name: '受信開始' }));
+    await waitFor(() => expect(mocks.endRun).toHaveBeenCalled());
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(listClientDiagnostics()).toEqual([]);
   });
 });

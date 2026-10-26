@@ -23,7 +23,6 @@ const SwitcherPage = lazy(() => import('./features/switcher/SwitcherPage'));
 const SlidesAdminPage = lazy(() => import('./features/admin/SlidesAdminPage'));
 const CommentsAdminPage = lazy(() => import('./features/admin/CommentsAdminPage'));
 const UsersAdminPage = lazy(() => import('./features/admin/UsersAdminPage'));
-const VenueMicPage = lazy(() => import('./features/venue/VenueMicPage'));
 const VenueSpeakerPage = lazy(() => import('./features/venue/VenueSpeakerPage'));
 
 const guarded = (feature: Feature, element: ReactNode) => (
@@ -51,7 +50,7 @@ export function App() {
           <Route path="/archives/:id" element={guarded('archives', <ArchiveDetailPage />)} />
           <Route path="/send/camera" element={guarded('cameraSend', <CameraSendPage />)} />
           <Route path="/send/mic" element={guarded('micSend', <MicSendPage />)} />
-          <Route path="/venue/mic" element={guarded('venueSpeaker', <VenueMicPage />)} />
+          <Route path="/venue/mic" element={guarded('micSend', <Navigate to="/send/mic" replace />)} />
           <Route path="/venue/speaker" element={guarded('venueSpeaker', <VenueSpeakerPage />)} />
           <Route path="/send/slide" element={guarded('slideShare', <SlideSharePage />)} />
           <Route path="/admin/switcher" element={guarded('switcher', <SwitcherPage />)} />

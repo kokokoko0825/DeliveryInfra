@@ -13,7 +13,8 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { ConfirmAction } from '@/components/app/ConfirmAction';
-import { errorMessage } from '@/lib/api';
+import { ApiError, errorMessage } from '@/lib/api';
+import { recordClientDiagnostic } from '@/lib/diagnostics';
 import { fetchBroadcast, fetchBroadcastStats, startBroadcast, stopBroadcast } from '@/lib/ivs/mediaApi';
 import { formatBitrate } from '@/lib/ivs/stats';
 import { queryKeys } from '@/lib/query-keys';
@@ -83,6 +84,7 @@ export function BroadcastPanel({ running, publishing, bitrate, startPublishing, 
     } catch (error) {
       // 開始の応答が成功した後は、番組の送信を止めない（R4-01）
       if (!started) stopPublishing();
+      if (!(error instanceof ApiError)) recordClientDiagnostic(error, 'switcher.broadcast.start');
       toast.error(errorMessage(error));
     } finally {
       await refresh();
@@ -97,6 +99,7 @@ export function BroadcastPanel({ running, publishing, bitrate, startPublishing, 
       stopPublishing();
       toast.success('配信を終了しました');
     } catch (error) {
+      if (!(error instanceof ApiError)) recordClientDiagnostic(error, 'switcher.broadcast.stop');
       toast.error(errorMessage(error));
     } finally {
       await refresh();

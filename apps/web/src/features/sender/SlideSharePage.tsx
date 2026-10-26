@@ -8,6 +8,7 @@ import { ConnectionStatus, ErrorNotice, LevelMeter, SenderShell, VideoPreview } 
 import { PC_AUDIO_PUBLISH, SLIDE_PUBLISH, displayMediaOptions, toPublishTracks } from './engine/media';
 import { canStart, classifyError, errorText, isActive, type SenderErrorKind } from './engine/session';
 import { useStageSender } from './useStageSender';
+import { recordClientDiagnostic } from '@/lib/diagnostics';
 
 function ShareGuide() {
   return (
@@ -67,6 +68,7 @@ export default function SlideSharePage() {
       setMediaError(null);
       return next;
     } catch (error) {
+      if (!(error instanceof DOMException && error.name === 'AbortError')) recordClientDiagnostic(error, 'media.screen-share.capture');
       setMediaError(classifyError(error));
       return null;
     }

@@ -7,6 +7,7 @@ const api = vi.hoisted(() => ({
 vi.mock('@/lib/api', () => ({ apiFetch: api.fetch, ApiError: api.ApiError }));
 
 const { startVenueMic, startVenueSpeaker } = await import('./venueAudio');
+const { clearClientDiagnostics, listClientDiagnostics } = await import('@/lib/diagnostics');
 const STUN_URL = 'stun:stun.l.google.com:19302';
 
 const peers: FakePeer[] = [];
@@ -17,6 +18,18 @@ let offers = new Map<string, { type: 'offer'; sdp: string }>();
 let answers = new Map<string, { type: 'answer'; sdp: string }>();
 let offerPairs = new Map<string, string>();
 let participantNumber = 0;
+
+function memoryStorage(): Storage {
+  const values = new Map<string, string>();
+  return {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => { values.set(key, value); },
+    removeItem: (key) => { values.delete(key); },
+    clear: () => values.clear(),
+    key: (index) => [...values.keys()][index] ?? null,
+    get length() { return values.size; },
+  };
+}
 
 class FakeChannel {
   readyState = 'open';
@@ -30,6 +43,7 @@ class FakeChannel {
 class FakePeer {
   signalingState = 'stable';
   connectionState = 'new';
+  iceConnectionState = 'new';
   iceGatheringState = 'complete';
   localDescription: RTCSessionDescriptionInit | null = null;
   onconnectionstatechange: (() => void) | null = null;
@@ -101,6 +115,7 @@ function transportPacket(micSlot: number, sequence: number, timestamp: number) {
 }
 
 beforeEach(() => {
+  vi.stubGlobal('localStorage', memoryStorage());
   peers.length = 0;
   contexts.length = 0;
   sessions.length = 0;
@@ -109,6 +124,7 @@ beforeEach(() => {
   answers = new Map();
   offerPairs = new Map();
   participantNumber = 0;
+  clearClientDiagnostics();
   api.fetch.mockReset().mockImplementation(async (path: string, options?: { method?: string; body?: unknown }) => {
     const method = options?.method ?? 'GET';
     const pair = path.match(/\/(offers|answers)\/(\d+)\/(\d+)$/u);
@@ -231,7 +247,7 @@ describe('venue room audio transport', () => {
     expect(answers.get('1/1')?.type).toBe('answer');
     expect(peers.every((peer) => peer.configuration.iceServers?.length === 1 && peer.configuration.iceServers[0]?.urls === STUN_URL)).toBe(true);
     expect(peers.every((peer) => !peer.configuration.iceServers?.some((server) => (Array.isArray(server.urls) ? server.urls : [server.urls]).some((url) => url.startsWith('turn:'))))).toBe(true);
-    expect(api.fetch.mock.calls.every(([path]) => String(path).includes('/venue-speaker/rooms/venue-poc/'))).toBe(true);
+    expect(api.fetch.mock.calls.every(([path]) => String(path).includes('/venue-speaker/rooms/venue-live/'))).toBe(true);
     expect(api.fetch.mock.calls.some(([path]) => /relay|turn:|stun:/iu.test(String(path)))).toBe(false);
     contexts[0]!.processor.port.onmessage?.({ data: new ArrayBuffer(960) } as MessageEvent);
     const outgoingChannel = peers.find((peer) => peer.createDataChannel.mock.calls.length > 0)!.channel;
@@ -279,7 +295,7 @@ describe('venue room audio transport', () => {
     expect(micSnapshot.peers.map((peer) => peer.sentPackets)).toEqual([1, 1]);
     expect(micSnapshot.peers.reduce((sum, peer) => sum + peer.sentPackets, 0)).toBe(2);
     const micLinks = peers.filter((peer) => peer.createDataChannel.mock.calls.length > 0);
-    micLinks[0]!.channel.bufferedAmount = 64_000;
+    micLinks[0]!.channel.bufferedAmount = 3_920;
     contexts[0]!.processor.port.onmessage?.({ data: new ArrayBuffer(960) } as MessageEvent);
     const afterDrop = sessions[0]!.getMetrics();
     expect(afterDrop.sentPackets).toBe(2);
@@ -291,14 +307,90 @@ describe('venue room audio transport', () => {
     expect(peers.slice(4).every((peer) => peer.configuration.iceServers?.length === 1 && peer.configuration.iceServers[0]?.urls === STUN_URL)).toBe(true);
   });
 
-  it('rejects the connection promise and closes links when every initial peer fails', async () => {
+  it('keeps retrying when every initial peer fails and resolves after a retry connects', async () => {
     await joinMic();
     await joinSpeaker();
     await waitForLinks(1);
-    const failed = sessions.map((session) => expect(session.connected).rejects.toThrow('WebRTC 接続に失敗しました'));
+    const connected = sessions[0]!.connected;
     for (const peer of peers) { peer.connectionState = 'failed'; peer.onconnectionstatechange?.(); }
-    await Promise.all(failed);
     expect(peers.every((peer) => peer.signalingState === 'closed')).toBe(true);
+    await vi.waitFor(() => expect(peers.length).toBeGreaterThan(2), { timeout: 4000, interval: 30 });
+    for (const peer of peers.slice(2)) { peer.connectionState = 'connected'; peer.onconnectionstatechange?.(); }
+    await expect(connected).resolves.toBeUndefined();
+  });
+
+  it('records failed peer state and negotiation context for export', async () => {
+    await joinMic();
+    await joinSpeaker();
+    await waitForLinks(1);
+    peers[0]!.connectionState = 'failed';
+    peers[0]!.onconnectionstatechange?.();
+    expect(listClientDiagnostics()).toMatchObject([{
+      source: 'venue.peer',
+      context: { phase: 'connection-failed', role: 'speaker', peerId: '1:1', connectionState: 'failed', iceConnectionState: 'new' },
+    }]);
+    for (const session of sessions) session.close();
+  });
+
+  it('logs participant discovery failures and retries the next poll', async () => {
+    const original = api.fetch.getMockImplementation()!;
+    let polls = 0;
+    api.fetch.mockImplementation(async (path: string, options?: { method?: string; body?: unknown }) => {
+      if (String(path).endsWith('/participants') && (options?.method ?? 'GET') === 'GET') {
+        polls++;
+        if (polls === 2) throw new Error('temporary discovery outage');
+      }
+      return original(path, options);
+    });
+    const mic = await joinMic();
+    await vi.waitFor(() => expect(listClientDiagnostics()).toMatchObject([{ source: 'venue.discovery', context: { phase: 'participant-poll', role: 'mic', slot: 1 } }]));
+    await vi.waitFor(() => expect(polls).toBeGreaterThanOrEqual(3), { timeout: 2000, interval: 20 });
+    expect(polls).toBeGreaterThanOrEqual(3);
+    mic.close();
+  });
+
+  it('classifies DataChannel send exceptions separately from backpressure drops', async () => {
+    await joinMic();
+    await joinSpeaker();
+    await waitForLinks(1);
+    const outgoing = peers.find((peer) => peer.createDataChannel.mock.calls.length > 0)!.channel;
+    outgoing.send.mockImplementationOnce(() => { throw new Error('channel send failed'); });
+    contexts[0]!.processor.port.onmessage?.({ data: new ArrayBuffer(960) } as MessageEvent);
+    expect(sessions[0]!.getMetrics().backpressureDrops).toBe(0);
+    expect(listClientDiagnostics()).toMatchObject([{ source: 'venue.data-channel', context: { phase: 'send-exception', role: 'mic', peerId: '1:1' } }]);
+  });
+
+  it('logs non-404 lease renewal failures and ignores renewal after close', async () => {
+    vi.useFakeTimers();
+    const mic = await joinMic();
+    const original = api.fetch.getMockImplementation()!;
+    api.fetch.mockImplementation(async (path: string, options?: { method?: string; body?: unknown }) => {
+      if ((options?.method ?? 'GET') === 'PATCH') throw new Error('renewal unavailable');
+      return original(path, options);
+    });
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(listClientDiagnostics()).toMatchObject([{ source: 'venue.lease', context: { phase: 'renewal', role: 'mic', slot: 1, status: null } }]);
+    mic.close();
+    api.fetch.mockImplementation(async (path: string, options?: { method?: string; body?: unknown }) => {
+      if ((options?.method ?? 'GET') === 'PATCH') throw new Error('late close failure');
+      return original(path, options);
+    });
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(listClientDiagnostics()).toHaveLength(1);
+  });
+
+  it('treats a missing participant lease as intentional close without an error diagnostic', async () => {
+    vi.useFakeTimers();
+    const mic = await joinMic();
+    const original = api.fetch.getMockImplementation()!;
+    api.fetch.mockImplementation(async (path: string, options?: { method?: string; body?: unknown }) => {
+      if ((options?.method ?? 'GET') === 'PATCH') throw new api.ApiError(404);
+      return original(path, options);
+    });
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(listClientDiagnostics()).toEqual([]);
+    expect(participants).toHaveLength(0);
+    mic.close();
   });
 
   it('connects every mic to every speaker and removes its participant and peers on close', async () => {
