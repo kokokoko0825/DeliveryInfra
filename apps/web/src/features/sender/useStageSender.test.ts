@@ -24,6 +24,21 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe('useStageSender', () => {
+  it('releases a late token without joining after stop', async () => {
+    let finishToken: (value: ReturnType<typeof tokenResponse>) => void = () => undefined;
+    api.requestStageTokens.mockReset().mockImplementation(() => new Promise((resolve) => { finishToken = resolve; }));
+    const { result } = renderHook(() => useStageSender('mic'));
+    let starting: Promise<void> = Promise.resolve();
+    act(() => { starting = result.current.start(tracks, 'MIC1'); });
+    await act(async () => { await Promise.resolve(); });
+    expect(api.requestStageTokens).toHaveBeenCalledOnce();
+    act(() => result.current.stop());
+    await act(async () => { finishToken(tokenResponse(['production'], 'late-device')); await starting; });
+    expect(sessions).toHaveLength(0);
+    expect(api.releaseDevice).toHaveBeenCalledWith('late-device');
+    expect(result.current.state.status).toBe('idle');
+  });
+
   it('publishes to the production stage with the device name and holds a wake lock', async () => {
     const { result } = renderHook(() => useStageSender('camera'));
     await act(() => result.current.start(tracks, 'CAM2'));

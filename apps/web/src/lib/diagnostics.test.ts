@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { clearClientDiagnostics, downloadClientDiagnostics, installGlobalErrorHandlers, listClientDiagnostics, recordClientDiagnostic } from './diagnostics';
+import { clearClientDiagnostics, downloadClientDiagnostics, installGlobalErrorHandlers, listClientDiagnostics, recordClientDiagnostic, recordClientEvent } from './diagnostics';
 
 const memoryStorage = (): Storage => {
   const values = new Map<string, string>();
@@ -34,6 +34,13 @@ describe('client diagnostics', () => {
     expect(console.error).toHaveBeenCalledWith('[client-diagnostic]', expect.objectContaining({ source: 'test' }));
     recordClientDiagnostic(new Error('validation failed'), 'test.validation', { status: 400 });
     expect(console.warn).toHaveBeenCalledWith('[client-diagnostic]', expect.objectContaining({ source: 'test.validation' }));
+  });
+
+  it('persists non-error capture settings without reporting a console error', () => {
+    recordClientEvent('media.microphone.capture-settings', '処理状態を確認', { echoCancellation: false, credential: 'hidden' });
+    expect(listClientDiagnostics()).toMatchObject([{ source: 'media.microphone.capture-settings', name: 'Event', message: '処理状態を確認', context: { echoCancellation: false, credential: '[REDACTED]' } }]);
+    expect(console.error).not.toHaveBeenCalled();
+    expect(console.warn).not.toHaveBeenCalled();
   });
 
   it('redacts credentials, signed URL query strings, emails and local home paths from every field', () => {

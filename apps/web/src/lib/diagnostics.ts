@@ -90,18 +90,7 @@ function errorDetails(error: unknown) {
   return { name: typeof error, message: safeText(String(error)) };
 }
 
-export function recordClientDiagnostic(error: unknown, source: string, context?: DiagnosticContext) {
-  const details = errorDetails(error);
-  const entry: ClientDiagnostic = Object.freeze({
-    id: typeof globalThis.crypto?.randomUUID === 'function' ? globalThis.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    at: new Date().toISOString(),
-    source: safeText(source),
-    ...details,
-    ...(context ? { context: Object.fromEntries(Object.entries(context).map(([key, value]) => [safeText(key), safeContextValue(key, value)])) as DiagnosticContext } : {}),
-    path: typeof location === 'undefined' ? '' : safeText(location.pathname),
-    userAgent: typeof navigator === 'undefined' ? '' : safeText(navigator.userAgent),
-  });
-
+function saveClientDiagnostic(entry: ClientDiagnostic, reportConsole: boolean) {
   let deduplicated = false;
   try {
     const next = readDiagnostics();
@@ -118,12 +107,36 @@ export function recordClientDiagnostic(error: unknown, source: string, context?:
     // Diagnostics must never break the action that is being reported.
   }
   if (typeof window !== 'undefined') window.dispatchEvent(new Event('clientdiagnostic'));
-  if (!deduplicated) {
+  if (!deduplicated && reportConsole) {
     const status = entry.context?.status;
     if (typeof status === 'number' && status < 500) console.warn('[client-diagnostic]', entry);
     else console.error('[client-diagnostic]', entry);
   }
   return deduplicated ? readDiagnostics().at(-1)?.id ?? entry.id : entry.id;
+}
+
+function diagnosticEntry(source: string, name: string, message: string, context?: DiagnosticContext, stack?: string): ClientDiagnostic {
+  return Object.freeze({
+    id: typeof globalThis.crypto?.randomUUID === 'function' ? globalThis.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    at: new Date().toISOString(),
+    source: safeText(source),
+    name: safeText(name),
+    message: safeText(message),
+    ...(stack ? { stack: safeText(stack) } : {}),
+    ...(context ? { context: Object.fromEntries(Object.entries(context).map(([key, value]) => [safeText(key), safeContextValue(key, value)])) as DiagnosticContext } : {}),
+    path: typeof location === 'undefined' ? '' : safeText(location.pathname),
+    userAgent: typeof navigator === 'undefined' ? '' : safeText(navigator.userAgent),
+  });
+}
+
+export function recordClientDiagnostic(error: unknown, source: string, context?: DiagnosticContext) {
+  const details = errorDetails(error);
+  return saveClientDiagnostic(diagnosticEntry(source, details.name, details.message, context, details.stack), true);
+}
+
+/** Persist a non-error event in the same exportable diagnostic log without console noise. */
+export function recordClientEvent(source: string, message: string, context?: DiagnosticContext) {
+  return saveClientDiagnostic(diagnosticEntry(source, 'Event', message, context), false);
 }
 
 export function listClientDiagnostics() {

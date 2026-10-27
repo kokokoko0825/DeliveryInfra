@@ -82,7 +82,7 @@ describe('createReconnector', () => {
     expect(connect).toHaveBeenCalledTimes(1);
   });
 
-  it('ignores triggers while a connection attempt is running', async () => {
+  it('schedules one retry after a trigger during a running connection attempt', async () => {
     let resolve: () => void = () => undefined;
     const connect = vi.fn(() => new Promise<void>((done) => { resolve = done; }));
     const { scheduler, queue } = manualScheduler();
@@ -90,10 +90,25 @@ describe('createReconnector', () => {
     const started = reconnector.start();
     reconnector.trigger();
     expect(queue).toHaveLength(0);
-    void reconnector.start();
     expect(connect).toHaveBeenCalledTimes(1);
     resolve();
     await started;
+    expect(queue).toHaveLength(1);
+    expect(reconnector.pending).toBe(true);
+  });
+
+  it('does not schedule a latched retry when stopped during an in-flight connection', async () => {
+    let resolve: () => void = () => undefined;
+    const connect = vi.fn(() => new Promise<void>((done) => { resolve = done; }));
+    const { scheduler, queue } = manualScheduler();
+    const reconnector = createReconnector(connect, scheduler, () => 10);
+    const started = reconnector.start();
+    reconnector.trigger();
+    reconnector.stop();
+    resolve();
+    await started;
+    expect(queue).toHaveLength(0);
+    expect(reconnector.pending).toBe(false);
   });
 
   it('uses the lib/retry backoff by default', async () => {

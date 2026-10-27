@@ -8,7 +8,7 @@ type Participant = { participantId: string; userId: string; side: Side; slot: nu
 type Registration = { participantId: string; side: Side; slot: number; expiresAt: string };
 type ParticipantOptions = { roomId?: string; slot?: number };
 export type VenueTransport = 'pcm' | 'audio-track';
-type TransportOptions = ParticipantOptions & { transport?: VenueTransport };
+type TransportOptions = ParticipantOptions & { transport?: VenueTransport; onLeaseLost?: () => void };
 export type VenuePeerMetrics = Readonly<{
   peerId: string;
   side: Side;
@@ -220,6 +220,7 @@ function createSession(
   setupAudio: () => AudioController,
   transport: VenueTransport = 'pcm',
   micStream?: MediaStream,
+  onLeaseLost?: () => void,
 ): VenueSession {
   const links = new Map<string, Link>();
   const peerHistory = new Map<string, PeerCounters>();
@@ -237,6 +238,8 @@ function createSession(
   let connectedReject!: (error: Error) => void;
   let connectedSettled = false;
   const connected = new Promise<void>((resolve, reject) => { connectedResolve = resolve; connectedReject = reject; });
+  // A caller may close while startVenueMic is still returning the session.
+  void connected.catch(() => undefined);
   const updateRtt = (link: Link, value: number) => { latestRtt = value; link.metrics.rttMs = value; onRtt(value); };
 
   const closeLink = (key: string, link: Link) => {
@@ -447,6 +450,7 @@ function createSession(
       const own = participants.find((participant) => participant.participantId === registration.participantId);
       if (!own) {
         close();
+        onLeaseLost?.();
         return;
       }
       const remotes = participants.filter((participant) => participant.participantId !== registration.participantId && participant.side !== side);
@@ -493,7 +497,7 @@ function createSession(
   const discovery = setInterval(() => { void discover(); }, DISCOVERY_INTERVAL_MS);
   const renewal = setInterval(() => {
     void apiFetch(`${roomPath(roomId)}/participants/${registration.participantId}`, { method: 'PATCH' }).catch((error) => {
-      if (error instanceof ApiError && error.status === 404) close();
+      if (error instanceof ApiError && error.status === 404) { close(); onLeaseLost?.(); }
       else if (!closed && !isAbortError(error)) recordClientDiagnostic(error, 'venue.lease', { phase: 'renewal', role: side, transport, slot: registration.slot, status: error instanceof ApiError ? error.status : null });
     });
   }, LEASE_RENEW_INTERVAL_MS);
@@ -571,7 +575,12 @@ export type VenueMicOptions = TransportOptions;
 export type VenueSpeakerOptions = TransportOptions;
 
 export type PreparedVenueSpeakerAudio = { context: AudioContext; ready: Promise<void> };
-export type PreparedVenueMicAudio = { context: AudioContext; ready: Promise<void> };
+export type PreparedVenueMicAudio = {
+  context: AudioContext;
+  ready: Promise<void>;
+  source?: MediaStreamAudioSourceNode;
+  ownsContext?: boolean;
+};
 
 /** Call synchronously from the speaker's user-gesture handler to unlock iOS Web Audio. */
 export function prepareVenueSpeakerAudio(): PreparedVenueSpeakerAudio {
@@ -590,6 +599,7 @@ export function prepareVenueMicAudio(): PreparedVenueMicAudio {
 export async function startVenueMic(stream: MediaStream, options: VenueMicOptions = {}, preparedAudio?: PreparedVenueMicAudio): Promise<VenueSession> {
   const roomId = options.roomId ?? ROOM_ID;
   const transport = options.transport ?? 'pcm';
+  const ownsContext = preparedAudio?.ownsContext ?? true;
   let registration: Registration | undefined;
   let context: AudioContext | undefined = preparedAudio?.context;
   let source: MediaStreamAudioSourceNode | undefined;
@@ -597,20 +607,27 @@ export async function startVenueMic(stream: MediaStream, options: VenueMicOption
   let silent: GainNode | undefined;
   let sendPcm: (data: ArrayBuffer) => void = () => undefined;
   let sequence = 0;
+  const closeAudio = () => {
+    if (source && processor) source.disconnect(processor);
+    processor?.disconnect();
+    silent?.disconnect();
+    if (ownsContext) void context?.close();
+  };
   try {
     if (preparedAudio) await preparedAudio.ready;
     const registered = await registerParticipant('mic', options);
     registration = registered;
     if (transport === 'audio-track') {
-      await context?.close();
-      return createSession('mic', registered, roomId, () => undefined, () => ({ close: () => undefined }), transport, stream);
+      if (ownsContext) await context?.close();
+      return createSession('mic', registered, roomId, () => undefined, () => ({ close: () => undefined }), transport, stream, options.onLeaseLost);
     }
     context ??= new AudioContext({ latencyHint: 'interactive', sampleRate: 48000 });
     if (context.state !== 'running') await context.resume();
     await context.audioWorklet.addModule(venuePcmWorkletUrl);
     processor = new AudioWorkletNode(context, 'venue-pcm', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
-    source = context.createMediaStreamSource(stream);
-    source.connect(processor);
+    const micSource = preparedAudio?.source ?? context.createMediaStreamSource(stream);
+    micSource.connect(processor);
+    source = micSource;
     silent = context.createGain();
     silent.gain.value = 0;
     processor.connect(silent);
@@ -619,16 +636,14 @@ export async function startVenueMic(stream: MediaStream, options: VenueMicOption
       if (data instanceof ArrayBuffer) sendPcm(encodePcmPacket(registered.slot, sequence++, performance.now(), data));
     };
   } catch (error) {
-    source?.disconnect(); processor?.disconnect(); silent?.disconnect();
-    if (context) void context.close();
+    closeAudio();
     if (registration) void apiFetch(`${roomPath(roomId)}/participants/${registration.participantId}`, { method: 'DELETE' }).catch(() => undefined);
     throw error;
   }
   if (!registration) throw new Error('マイク登録に失敗しました');
   const session = createSession('mic', registration, roomId, () => undefined, () => ({ close: () => {
-    source?.disconnect(); processor?.disconnect(); silent?.disconnect();
-    if (context) void context.close();
-  }, setPcmSender: (send) => { sendPcm = send; } }), transport, stream);
+    closeAudio();
+  }, setPcmSender: (send) => { sendPcm = send; } }), transport, stream, options.onLeaseLost);
   return session;
 }
 
@@ -695,6 +710,6 @@ export async function startVenueSpeaker(onRtt: (rtt: number) => void, options: V
       track.addEventListener('ended', stop, { once: true });
       return () => { track.removeEventListener('ended', stop); stop(); };
     } } : {}),
-  }), transport);
+  }), transport, undefined, options.onLeaseLost);
   return session;
 }

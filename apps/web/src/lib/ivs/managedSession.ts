@@ -25,18 +25,22 @@ export function createManagedSession(options: ManagedSessionOptions) {
   let session: StageSession | null = null;
   let tracks = options.tracks ?? [];
   let muted = false;
+  let generation = 0;
 
   const drop = () => {
     session?.leave();
     session = null;
   };
   const connect = async () => {
+    const currentGeneration = generation;
     drop();
     const token = await options.fetchToken();
+    if (currentGeneration !== generation) return;
     const next = createStageSession(token, { publish: options.publish, subscribe: options.subscribe, tracks }, {
       ...options.handlers,
       onRecoverableLoss: (reason) => {
         if (session !== next) return;
+        generation += 1;
         drop();
         options.onReset?.();
         options.onStatus?.('reconnecting');
@@ -45,6 +49,7 @@ export function createManagedSession(options: ManagedSessionOptions) {
       },
       onEnded: (reason) => {
         if (session !== next) return;
+        generation += 1;
         reconnector.stop();
         drop();
         options.onReset?.();
@@ -55,6 +60,7 @@ export function createManagedSession(options: ManagedSessionOptions) {
     });
     session = next;
     await next.join();
+    if (session !== next) return;
     if (muted) next.setMuted('audio', true);
     options.onStatus?.('connected');
   };
@@ -63,17 +69,20 @@ export function createManagedSession(options: ManagedSessionOptions) {
   return {
     /** 初回接続。失敗時は例外を投げ、再試行を予約する（不要なら stop() を呼ぶ）。 */
     start: () => {
+      generation += 1;
       options.onStatus?.('connecting');
       return reconnector.start();
     },
     /** 外部要因（ハートビート失効など）で接続し直す。 */
     restart: () => {
+      generation += 1;
       drop();
       options.onReset?.();
       options.onStatus?.('reconnecting');
       reconnector.trigger();
     },
     stop: () => {
+      generation += 1;
       reconnector.stop();
       drop();
       options.onReset?.();

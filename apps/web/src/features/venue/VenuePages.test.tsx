@@ -54,6 +54,7 @@ function setupMedia() {
 describe('venue PoC pages', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    window.history.replaceState(null, '', '/');
     vi.stubGlobal('localStorage', memoryStorage());
     clearClientDiagnostics();
     mocks.createRun.mockResolvedValue(undefined);
@@ -64,7 +65,7 @@ describe('venue PoC pages', () => {
     mocks.prepareSpeakerAudio.mockReturnValue({ context: { close: mocks.close } as unknown as AudioContext, ready: Promise.resolve() });
     mocks.createRecorder.mockReturnValue({ start: vi.fn(), stop: vi.fn().mockResolvedValue({ blob: new Blob(['evidence']), mimeType: 'audio/webm;codecs=opus', extension: 'webm', byteCount: 8 }), cleanup: vi.fn() });
   });
-  afterEach(() => { vi.useRealTimers(); });
+  afterEach(() => { vi.useRealTimers(); window.history.replaceState(null, '', '/'); });
 
   it('selects a mic slot, keeps capture processing disabled, and saves a mapped one-second health sample', async () => {
     const { stream, getUserMedia } = setupMedia();
@@ -128,7 +129,7 @@ describe('venue PoC pages', () => {
     expect(screen.getByText(/消音モードを解除/)).toBeInTheDocument();
     fireEvent.change(screen.getByRole('combobox', { name: 'スピーカースロット' }), { target: { value: '3' } });
     fireEvent.click(screen.getByRole('button', { name: '受信開始' }));
-    await waitFor(() => expect(mocks.startSpeaker).toHaveBeenCalledWith(expect.any(Function), { transport: 'pcm', slot: 3 }, expect.any(Object)));
+    await waitFor(() => expect(mocks.startSpeaker).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({ transport: 'pcm', slot: 3, onLeaseLost: expect.any(Function) }), expect.any(Object)));
     expect(await screen.findByText('自分のスロット: SPK3')).toBeInTheDocument();
     expect(screen.getByText(/診断 RTT: 21.5 ms/)).toBeInTheDocument();
     expect(screen.getAllByText(/片道音声遅延ではありません/)).toHaveLength(2);
@@ -139,6 +140,28 @@ describe('venue PoC pages', () => {
     fireEvent.click(screen.getByRole('button', { name: '受信開始' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('IndexedDB unavailable');
     expect(listClientDiagnostics()).toMatchObject([{ source: 'venue.session', context: { phase: 'start', side: 'speaker' } }]);
+  });
+
+  it('stores a shared trial ID in the speaker run metadata', async () => {
+    window.history.replaceState(null, '', '/venue/speaker?trialId=room_42');
+    mocks.startSpeaker.mockResolvedValue(fakeSession('speaker', 1));
+    render(<VenueSpeakerPage />);
+    fireEvent.click(screen.getByRole('button', { name: '受信開始' }));
+    await waitFor(() => expect(mocks.createRun).toHaveBeenCalledWith(expect.objectContaining({ peers: ['config.transport=pcm', 'config.trialId=room_42'] })));
+    expect(screen.getByText(/現在の試験名:/)).toHaveTextContent('room_42');
+  });
+
+  it('stops and reports when the speaker participant lease is lost', async () => {
+    mocks.startSpeaker.mockResolvedValue(fakeSession('speaker', 1));
+    render(<VenueSpeakerPage />);
+    fireEvent.click(screen.getByRole('button', { name: '受信開始' }));
+    await waitFor(() => expect(mocks.startSpeaker).toHaveBeenCalledOnce());
+    const options = mocks.startSpeaker.mock.calls[0]?.[1] as { onLeaseLost: () => void };
+    act(() => options.onLeaseLost());
+    expect(screen.getByText('状態: エラー')).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('会場接続が終了しました。再度受信を開始してください');
+    await waitFor(() => expect(mocks.endRun).toHaveBeenCalledOnce());
+    expect(listClientDiagnostics()).toMatchObject([{ source: 'venue.speaker.lease-lost' }]);
   });
 
   it('uses Auto by default and explains iOS microphone permission failures', async () => {

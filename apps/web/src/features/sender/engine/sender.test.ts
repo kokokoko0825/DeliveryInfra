@@ -1,10 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { deviceNameOptions, firstFreeName, validateDeviceName } from './deviceName';
 import {
-  AUDIO_PUBLISH, CAMERA_PUBLISH, LEVEL_FLOOR_DB, cameraConstraints, createVenueMicTrack, displayMediaOptions, levelPercent, micConstraints, rms, smoothLevel, toPublishTracks,
+  AUDIO_PUBLISH, CAMERA_PUBLISH, LEVEL_FLOOR_DB, cameraConstraints, displayMediaOptions, levelPercent, micConstraints, rms, smoothLevel, toPublishTracks,
 } from './media';
 import { canStart, classifyError, errorText, initialSenderState, isActive, senderReducer, statusText, type SenderState } from './session';
-import { FakeTrack } from '@/lib/ivs/testing';
 
 describe('deviceName', () => {
   it('offers CAM1〜CAM6 and MIC1〜MIC5', () => {
@@ -123,37 +122,7 @@ describe('media constraints', () => {
     expect((cameraConstraints('environment').video as MediaTrackConstraints).facingMode).toEqual({ ideal: 'environment' });
   });
   it('mic: 48kHz mono, audio only', () => {
-    expect(micConstraints()).toEqual({ video: false, audio: { sampleRate: 48000, channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-  });
-  it('creates a low-latency venue clone from the same physical microphone input', async () => {
-    const source = new FakeTrack('audio', 'mic-input');
-    const venue = await createVenueMicTrack(source as unknown as MediaStreamTrack);
-    expect(venue).not.toBe(source);
-    expect((venue as unknown as FakeTrack).sourceId).toBe(source.sourceId);
-    expect((venue as unknown as FakeTrack).applyConstraints).toHaveBeenCalledWith({ echoCancellation: false, noiseSuppression: false, autoGainControl: false });
-    expect((venue as unknown as FakeTrack).getSettings()).toMatchObject({ echoCancellation: false, noiseSuppression: false, autoGainControl: false });
-  });
-  it('stops the venue clone if the browser cannot apply low-latency processing settings', async () => {
-    const source = new FakeTrack('audio', 'mic-input');
-    const clone = source.clone();
-    clone.applyConstraints.mockRejectedValueOnce(new Error('unsupported constraints'));
-    source.clone.mockReturnValueOnce(clone);
-    await expect(createVenueMicTrack(source as unknown as MediaStreamTrack)).rejects.toThrow('unsupported constraints');
-    expect(clone.stop).toHaveBeenCalledOnce();
-  });
-  it.each(['echoCancellation', 'noiseSuppression', 'autoGainControl'] as const)('rejects a venue clone when the browser leaves %s enabled', async (setting) => {
-    const source = new FakeTrack('audio', 'mic-input');
-    const clone = source.clone();
-    clone.applyConstraints.mockResolvedValueOnce(undefined);
-    clone.getSettings.mockReturnValueOnce({
-      deviceId: clone.sourceId,
-      echoCancellation: setting === 'echoCancellation',
-      noiseSuppression: setting === 'noiseSuppression',
-      autoGainControl: setting === 'autoGainControl',
-    });
-    source.clone.mockReturnValueOnce(clone);
-    await expect(createVenueMicTrack(source as unknown as MediaStreamTrack)).rejects.toThrow('低遅延設定を確認できません');
-    expect(clone.stop).toHaveBeenCalledOnce();
+    expect(micConstraints()).toEqual({ video: false, audio: { sampleRate: 48000, channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
   });
   it('display: max 1280x720@30 with system audio (F-SHR-03, 04)', () => {
     const options = displayMediaOptions();

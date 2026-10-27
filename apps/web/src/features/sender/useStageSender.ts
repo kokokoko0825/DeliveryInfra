@@ -84,6 +84,10 @@ export function useStageSender(purpose: SenderPurpose) {
         await release();
         try {
           const response = await requestStageTokens(purpose, deviceName, first && takeover);
+          if (managed.current !== session) {
+            if (response.deviceId) void releaseDevice(response.deviceId).catch(() => undefined);
+            return tokenFor(response, STAGE_OF[purpose]);
+          }
           deviceId.current = response.deviceId;
           return tokenFor(response, STAGE_OF[purpose]);
         } catch (error) {
@@ -109,6 +113,7 @@ export function useStageSender(purpose: SenderPurpose) {
     try {
       await session.start();
     } catch (error) {
+      if (managed.current !== session) return;
       // 初回の失敗（台数上限・権限など）は自動再試行せずに表示する
       recordClientDiagnostic(error, 'stage.sender.start', { purpose, kind: classifyError(error) });
       session.stop();
@@ -139,6 +144,7 @@ export function useStageSender(purpose: SenderPurpose) {
   }, [release]);
   useEffect(() => () => {
     managed.current?.stop();
+    managed.current = null;
     stopHeartbeat();
     void release();
   }, [release, stopHeartbeat]);

@@ -1,3 +1,4 @@
+import { StrictMode } from 'react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '@/lib/api';
@@ -6,10 +7,15 @@ import { FakeMediaStream, FakeTrack, installMediaGlobals, stageMock, tokenRespon
 
 const sessions = vi.hoisted(() => [] as FakeSession[]);
 const api = vi.hoisted(() => ({ requestStageTokens: vi.fn(), sendHeartbeat: vi.fn(), releaseDevice: vi.fn(), fetchDeviceNamesInUse: vi.fn() }));
-const venueAudio = vi.hoisted(() => ({ prepare: vi.fn(), start: vi.fn() }));
+const venueAudio = vi.hoisted(() => ({ start: vi.fn() }));
+const micGraph = vi.hoisted(() => ({ prepare: vi.fn(), create: vi.fn() }));
+const runLog = vi.hoisted(() => ({ create: vi.fn(), append: vi.fn(), end: vi.fn() }));
 vi.mock('@/lib/ivs/stage', () => stageMock(sessions));
 vi.mock('@/lib/ivs/mediaApi', async (importOriginal) => ({ ...(await importOriginal<typeof import('@/lib/ivs/mediaApi')>()), ...api }));
-vi.mock('@/features/venue/venueAudio', () => ({ prepareVenueMicAudio: venueAudio.prepare, startVenueMic: venueAudio.start }));
+vi.mock('@/features/venue/venueAudio', () => ({ startVenueMic: venueAudio.start }));
+vi.mock('@/features/venue/VenueMicPage', () => ({ VenueRunControls: () => null, metricsValues: () => ({ connectedPeers: 0 }) }));
+vi.mock('@/features/venue/venueRunLog', () => ({ createVenueRun: runLog.create, appendVenueRunRecord: runLog.append, endVenueRun: runLog.end }));
+vi.mock('./micAudioGraph', () => ({ prepareMicAudio: micGraph.prepare, createMicAudioGraph: micGraph.create }));
 
 const { default: CameraSendPage } = await import('./CameraSendPage');
 const { default: MicSendPage } = await import('./MicSendPage');
@@ -19,6 +25,7 @@ const getUserMedia = vi.fn();
 const getDisplayMedia = vi.fn();
 
 beforeEach(() => {
+  window.history.replaceState(null, '', '/');
   clearClientDiagnostics();
   sessions.length = 0;
   installMediaGlobals();
@@ -26,8 +33,16 @@ beforeEach(() => {
   api.sendHeartbeat.mockReset().mockResolvedValue({ expiresAt: '2026-10-19T00:00:00.000Z' });
   api.releaseDevice.mockReset().mockResolvedValue(undefined);
   api.fetchDeviceNamesInUse.mockReset().mockResolvedValue({ inUse: [] });
-  venueAudio.prepare.mockReset().mockReturnValue({ context: { close: vi.fn().mockResolvedValue(undefined) }, ready: Promise.resolve() });
-  venueAudio.start.mockReset().mockResolvedValue({ close: vi.fn(), connected: Promise.resolve() });
+  venueAudio.start.mockReset().mockResolvedValue({ close: vi.fn(), connected: Promise.resolve(), getMetrics: () => ({ slot: 1 }) });
+  runLog.create.mockReset().mockResolvedValue(undefined);
+  runLog.append.mockReset().mockResolvedValue(true);
+  runLog.end.mockReset().mockResolvedValue(undefined);
+  micGraph.prepare.mockReset().mockImplementation((existing?: { context: object }) => ({ context: existing?.context ?? { state: 'running', resume: vi.fn().mockResolvedValue(undefined), close: vi.fn().mockResolvedValue(undefined) }, ready: Promise.resolve() }));
+  micGraph.create.mockReset().mockImplementation((rawTrack: FakeTrack, prepared: { context: object; ready: Promise<void> }) => Promise.resolve({
+    context: prepared.context, ready: prepared.ready, source: { id: 'shared-input' },
+    streamTrack: new FakeTrack('audio', 'processed-stream'), dspMode: 'processed', level: () => 0,
+    bypassDsp: vi.fn(), close: vi.fn(), rawTrack,
+  }));
   getUserMedia.mockReset().mockImplementation((constraints: MediaStreamConstraints) =>
     Promise.resolve(new FakeMediaStream([new FakeTrack(constraints.video ? 'video' : 'audio')])));
   getDisplayMedia.mockReset().mockImplementation(() => Promise.resolve(new FakeMediaStream([new FakeTrack('video'), new FakeTrack('audio')])));
@@ -139,209 +154,275 @@ describe('CameraSendPage (S-01)', () => {
 });
 
 describe('MicSendPage (S-02)', () => {
-  it('uses a low-latency clone of the same mic input for venue while IVS keeps the original track', async () => {
+  it('captures once, sends the raw input to venue and the processed track to IVS', async () => {
+    window.history.replaceState(null, '', '/send/mic?trialId=room_42');
     const closeVenue = vi.fn();
-    venueAudio.start.mockResolvedValueOnce({ close: closeVenue, connected: Promise.resolve() });
+    venueAudio.start.mockResolvedValueOnce({ close: closeVenue, connected: Promise.resolve(), getMetrics: () => ({ slot: 1 }) });
     render(<MicSendPage />);
-    const venueToggle = screen.getByRole('switch', { name: '会場スピーカーにも送信' });
-    fireEvent.click(venueToggle);
-    await waitFor(() => expect(venueAudio.start).toHaveBeenCalledTimes(1));
-    const stream = (await getUserMedia.mock.results[0]?.value) as FakeMediaStream;
+    const toggle = screen.getByRole('switch', { name: '会場スピーカーにも送信' });
+    fireEvent.click(toggle);
+    await waitFor(() => expect(venueAudio.start).toHaveBeenCalledOnce());
+    const media = (await getUserMedia.mock.results[0]?.value) as FakeMediaStream;
+    const raw = media.getAudioTracks()[0] as FakeTrack;
     const venueStream = venueAudio.start.mock.calls[0]?.[0] as FakeMediaStream;
-    const sourceTrack = stream.getAudioTracks()[0] as FakeTrack;
-    const venueTrack = venueStream.getAudioTracks()[0] as FakeTrack;
-    expect(venueAudio.start).toHaveBeenCalledWith(venueStream, {}, expect.objectContaining({ context: expect.any(Object) }));
-    expect(venueTrack).not.toBe(sourceTrack);
-    expect(venueTrack.sourceId).toBe(sourceTrack.sourceId);
-    expect(venueTrack.applyConstraints).toHaveBeenCalledWith({ echoCancellation: false, noiseSuppression: false, autoGainControl: false });
+    const venuePrepared = venueAudio.start.mock.calls[0]?.[2];
+    expect(venueStream.getAudioTracks()[0]).toBe(raw);
+    expect(venuePrepared).toMatchObject({ source: { id: 'shared-input' }, ownsContext: false });
+    expect(raw.clone).not.toHaveBeenCalled();
+    expect(runLog.create).toHaveBeenCalledWith(expect.objectContaining({ peers: expect.arrayContaining(['config.transport=pcm', 'config.route=web-audio', 'config.dsp=processed', 'config.trialId=room_42']) }));
+    await waitFor(() => expect(runLog.append.mock.calls.some(([, item]) => item.type === 'health')).toBe(true));
 
     fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
-    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('送信中'));
-    expect(sessions[0]?.options.tracks[0]?.track).toBe(stream.getAudioTracks()[0]);
-    expect(screen.getByText(/会場音声: 接続中（DataChannel PCM）/)).toBeInTheDocument();
-    fireEvent.click(venueToggle);
+    await screen.findByRole('button', { name: '送信停止' });
+    expect(sessions[0]?.options.tracks[0]?.track).toBe((await micGraph.create.mock.results[0]?.value).streamTrack);
+    expect(getUserMedia).toHaveBeenCalledOnce();
+    fireEvent.click(toggle);
     expect(closeVenue).toHaveBeenCalledOnce();
-    expect(venueTrack.stop).toHaveBeenCalledOnce();
+    await waitFor(() => expect(runLog.end).toHaveBeenCalledOnce());
+    expect(raw.stop).not.toHaveBeenCalled();
+    expect(sessions[0]?.leave).not.toHaveBeenCalled();
   });
 
-  it('shares an in-flight microphone capture between venue and IVS start', async () => {
-    let resolveCapture: (stream: FakeMediaStream) => void = () => undefined;
-    getUserMedia.mockImplementationOnce(() => new Promise<FakeMediaStream>((resolve) => { resolveCapture = resolve; }));
-    const source = new FakeTrack('audio');
-    const captured = new FakeMediaStream([source]);
+  it('shares a pending microphone capture between venue and IVS', async () => {
+    let finish: (media: FakeMediaStream) => void = () => undefined;
+    getUserMedia.mockImplementationOnce(() => new Promise<FakeMediaStream>((resolve) => { finish = resolve; }));
     render(<MicSendPage />);
     fireEvent.click(screen.getByRole('switch', { name: '会場スピーカーにも送信' }));
-    await waitFor(() => expect(getUserMedia).toHaveBeenCalledOnce());
     fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
     expect(getUserMedia).toHaveBeenCalledOnce();
-    await act(async () => resolveCapture(captured));
+    await act(async () => finish(new FakeMediaStream([new FakeTrack('audio')])));
     await screen.findByRole('button', { name: '送信停止' });
     await waitFor(() => expect(venueAudio.start).toHaveBeenCalledOnce());
-    const venueStream = venueAudio.start.mock.calls[0]?.[0] as FakeMediaStream;
-    expect(venueStream.getAudioTracks()[0]).not.toBe(source);
-    expect((venueStream.getAudioTracks()[0] as FakeTrack).sourceId).toBe(source.sourceId);
-    expect(sessions[0]?.options.tracks[0]?.track).toBe(source);
-    expect(getUserMedia).toHaveBeenCalledOnce();
+    expect(micGraph.create).toHaveBeenCalledOnce();
   });
 
-  it('allows a new microphone capture attempt after permission denial', async () => {
+  it('requests AEC, NS and AGC off without blocking unreported settings', async () => {
     const source = new FakeTrack('audio');
-    getUserMedia.mockRejectedValueOnce(Object.assign(new Error('denied'), { name: 'NotAllowedError' }));
+    source.getSettings.mockReturnValueOnce({ deviceId: source.sourceId } as ReturnType<typeof source.getSettings>);
     getUserMedia.mockResolvedValueOnce(new FakeMediaStream([source]));
+    render(<MicSendPage />);
+    fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
+    await screen.findByRole('button', { name: '送信停止' });
+    expect(getUserMedia.mock.calls[0]?.[0]).toMatchObject({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+    expect(screen.getByText(/マイクの音声処理設定を確認できません/)).toBeInTheDocument();
+    expect(sessions[0]?.options.tracks[0]?.config).toEqual({ maxAudioBitrateKbps: 64 });
+  });
+
+  it('continues when browser capture settings cannot be read', async () => {
+    const source = new FakeTrack('audio');
+    source.getSettings.mockImplementationOnce(() => { throw new Error('settings unavailable'); });
+    const getSupportedConstraints = vi.fn(() => { throw new Error('constraint query unavailable'); });
+    Object.defineProperty(navigator, 'mediaDevices', { value: { getUserMedia, getSupportedConstraints }, configurable: true });
+    getUserMedia.mockResolvedValueOnce(new FakeMediaStream([source]));
+    render(<MicSendPage />);
+    fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
+    await screen.findByRole('button', { name: '送信停止' });
+    expect(screen.getByText(/マイクの音声処理設定を確認できません/)).toBeInTheDocument();
+    expect(listClientDiagnostics().some((item) => item.source === 'media.microphone.get-settings' && item.message === 'settings unavailable')).toBe(true);
+    expect(listClientDiagnostics().some((item) => item.source === 'media.microphone.get-supported-constraints' && item.message === 'constraint query unavailable')).toBe(true);
+  });
+
+  it('does not continue after the physical track ends during graph construction', async () => {
+    let finishGraph: (value: Awaited<ReturnType<typeof micGraph.create>>) => void = () => undefined;
+    const close = vi.fn();
+    micGraph.create.mockImplementationOnce(() => new Promise((resolve) => { finishGraph = resolve; }));
+    render(<MicSendPage />);
+    fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
+    const source = ((await getUserMedia.mock.results[0]?.value) as FakeMediaStream).getAudioTracks()[0] as FakeTrack;
+    act(() => source.end());
+    await act(async () => finishGraph({ close } as unknown as Awaited<ReturnType<typeof micGraph.create>>));
+    expect(close).toHaveBeenCalledOnce();
+    expect(api.requestStageTokens).not.toHaveBeenCalled();
+    expect(source.stop).toHaveBeenCalledOnce();
+  });
+
+  it('stops a capture that resolves after leaving the page', async () => {
+    let finishCapture: (media: FakeMediaStream) => void = () => undefined;
+    getUserMedia.mockImplementationOnce(() => new Promise((resolve) => { finishCapture = resolve; }));
+    const { unmount } = render(<MicSendPage />);
+    fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
+    await waitFor(() => expect(getUserMedia).toHaveBeenCalledOnce());
+    unmount();
+    const late = new FakeMediaStream([new FakeTrack('audio')]);
+    await act(async () => finishCapture(late));
+    expect(late.tracks[0]?.stop).toHaveBeenCalledOnce();
+    expect(micGraph.create).not.toHaveBeenCalled();
+  });
+
+  it('closes a graph that finishes after leaving the page', async () => {
+    let finishGraph: (value: Awaited<ReturnType<typeof micGraph.create>>) => void = () => undefined;
+    micGraph.create.mockImplementationOnce(() => new Promise((resolve) => { finishGraph = resolve; }));
+    const { unmount } = render(<MicSendPage />);
+    fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
+    await waitFor(() => expect(micGraph.create).toHaveBeenCalledOnce());
+    unmount();
+    const close = vi.fn();
+    const media = (await getUserMedia.mock.results[0]?.value) as FakeMediaStream;
+    await act(async () => finishGraph({ close } as unknown as Awaited<ReturnType<typeof micGraph.create>>));
+    expect(close).toHaveBeenCalledOnce();
+    expect(media.tracks[0]?.stop).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not construct audio graph for a microphone track that already ended', async () => {
+    const source = new FakeTrack('audio');
+    source.readyState = 'ended';
+    getUserMedia.mockResolvedValueOnce(new FakeMediaStream([source]));
+    render(<MicSendPage />);
+    fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
+    expect(await screen.findByText('マイク入力が切断されました')).toBeInTheDocument();
+    expect(micGraph.create).not.toHaveBeenCalled();
+    expect(api.requestStageTokens).not.toHaveBeenCalled();
+  });
+
+  it('handles a pending microphone permission rejection after page unmount', async () => {
+    let deny: (reason: Error) => void = () => undefined;
+    getUserMedia.mockImplementationOnce(() => new Promise((_, reject) => { deny = reject; }));
+    const { unmount } = render(<MicSendPage />);
+    fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
+    await waitFor(() => expect(getUserMedia).toHaveBeenCalledOnce());
+    unmount();
+    await act(async () => deny(new DOMException('permission denied', 'NotAllowedError')));
+    expect(api.requestStageTokens).not.toHaveBeenCalled();
+    expect(micGraph.create).not.toHaveBeenCalled();
+  });
+
+  it('reports confirmed disabled capture processing in the venue run', async () => {
+    const source = new FakeTrack('audio');
+    source.getSettings.mockReturnValueOnce({
+      deviceId: source.sourceId, echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+    });
+    getUserMedia.mockResolvedValueOnce(new FakeMediaStream([source]));
+    render(<MicSendPage />);
+    fireEvent.click(screen.getByRole('switch', { name: '会場スピーカーにも送信' }));
+    await waitFor(() => expect(runLog.create).toHaveBeenCalled());
+    expect(screen.getByText(/マイクの音声処理をオフで取得しました/)).toBeInTheDocument();
+    expect(runLog.create).toHaveBeenCalledWith(expect.objectContaining({ peers: expect.arrayContaining([
+      'config.capture.echoCancellation=false', 'config.capture.noiseSuppression=false', 'config.capture.autoGainControl=false',
+    ]) }));
+  });
+
+  it('keeps venue transport running when the local run log cannot be created', async () => {
+    runLog.create.mockRejectedValueOnce(new Error('IndexedDB unavailable'));
+    render(<MicSendPage />);
+    fireEvent.click(screen.getByRole('switch', { name: '会場スピーカーにも送信' }));
+    await waitFor(() => expect(venueAudio.start).toHaveBeenCalledOnce());
+    expect(await screen.findByText(/会場音声: 接続中（DataChannel PCM）/)).toBeInTheDocument();
+    expect(screen.getByText(/会場の計測ログを保存できませんでした/)).toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: '会場スピーカーにも送信' })).toBeChecked();
+    expect(runLog.append).not.toHaveBeenCalled();
+  });
+
+  it('stops a failed capture and can retry graph setup', async () => {
+    micGraph.create.mockRejectedValueOnce(new Error('Web Audio graph failed'));
+    render(<MicSendPage />);
+    fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
+    expect(await screen.findByText('Web Audio graph failed')).toBeInTheDocument();
+    const failedMedia = (await getUserMedia.mock.results[0]?.value) as FakeMediaStream;
+    expect(failedMedia.getAudioTracks()[0]?.stop).toHaveBeenCalledOnce();
+    expect(api.requestStageTokens).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
+    await screen.findByRole('button', { name: '送信停止' });
+    expect(getUserMedia).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not start IVS while the existing audio context cannot resume', async () => {
+    render(<MicSendPage />);
+    fireEvent.click(screen.getByRole('button', { name: 'マイクを確認' }));
+    await waitFor(() => expect(micGraph.create).toHaveBeenCalledOnce());
+    micGraph.prepare.mockImplementationOnce((existing: { context: object }) => ({ context: existing.context, ready: Promise.reject(new Error('resume denied')) }));
+    fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
+    expect(await screen.findByText(/音声処理を再開できません/)).toBeInTheDocument();
+    expect(api.requestStageTokens).not.toHaveBeenCalled();
+  });
+
+  it('mutes both branches with the common input track', async () => {
+    render(<MicSendPage />);
+    fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
+    await screen.findByRole('button', { name: '送信停止' });
+    const raw = ((await getUserMedia.mock.results[0]?.value) as FakeMediaStream).getAudioTracks()[0] as FakeTrack & { enabled: boolean };
+    fireEvent.click(screen.getByRole('switch', { name: 'ミュート（配信・会場の両方）' }));
+    expect(raw.enabled).toBe(false);
+    expect(sessions[0]?.setMuted).toHaveBeenLastCalledWith('audio', true);
+    fireEvent.click(screen.getByRole('switch', { name: 'ミュート（配信・会場の両方）' }));
+    expect(raw.enabled).toBe(true);
+    expect(sessions[0]?.setMuted).toHaveBeenLastCalledWith('audio', false);
+  });
+
+  it('stops both destinations when the physical microphone ends', async () => {
+    const closeVenue = vi.fn();
+    venueAudio.start.mockResolvedValueOnce({ close: closeVenue, connected: Promise.resolve(), getMetrics: () => ({ slot: 1 }) });
+    render(<MicSendPage />);
+    fireEvent.click(screen.getByRole('switch', { name: '会場スピーカーにも送信' }));
+    await waitFor(() => expect(venueAudio.start).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
+    await screen.findByRole('button', { name: '送信停止' });
+    const media = (await getUserMedia.mock.results[0]?.value) as FakeMediaStream;
+    act(() => (media.getAudioTracks()[0] as FakeTrack).end());
+    expect(closeVenue).toHaveBeenCalledOnce();
+    expect(sessions[0]?.leave).toHaveBeenCalledOnce();
+    expect(screen.getByText(/マイク入力が切断されました。端末を確認して/)).toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: '会場スピーカーにも送信' })).not.toBeChecked();
+    expect(listClientDiagnostics().some((item) => item.source === 'media.microphone.track-ended')).toBe(true);
+    await waitFor(() => expect(runLog.end).toHaveBeenCalledOnce());
+  });
+
+  it('remains usable after React StrictMode replays the mount cleanup', async () => {
+    render(<StrictMode><MicSendPage /></StrictMode>);
+    fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
+    await screen.findByRole('button', { name: '送信停止' });
+    expect(getUserMedia).toHaveBeenCalledOnce();
+    expect(api.requestStageTokens).toHaveBeenCalledWith('mic', 'MIC1', false);
+  });
+
+  it('starts already muted when the switch was set before capture', async () => {
+    render(<MicSendPage />);
+    fireEvent.click(screen.getByRole('switch', { name: 'ミュート（配信・会場の両方）' }));
+    fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
+    await screen.findByRole('button', { name: '送信停止' });
+    const raw = ((await getUserMedia.mock.results[0]?.value) as FakeMediaStream).getAudioTracks()[0] as FakeTrack & { enabled: boolean };
+    expect(raw.enabled).toBe(false);
+    expect(sessions[0]?.setMuted).toHaveBeenCalledWith('audio', true);
+  });
+
+  it('allows another attempt after a denied capture', async () => {
+    getUserMedia.mockRejectedValueOnce(new DOMException('denied', 'NotAllowedError'));
+    getUserMedia.mockResolvedValueOnce(new FakeMediaStream([new FakeTrack('audio')]));
     render(<MicSendPage />);
     fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('マイクの使用が許可されていません');
     fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
     await screen.findByRole('button', { name: '送信停止' });
     expect(getUserMedia).toHaveBeenCalledTimes(2);
-    expect(sessions[0]?.options.tracks[0]?.track).toBe(source);
   });
 
-  it('resets the venue switch and reports errors when the direct route cannot start', async () => {
-    const source = new FakeTrack('audio');
-    const clone = source.clone();
-    source.clone.mockReturnValueOnce(clone);
-    getUserMedia.mockResolvedValueOnce(new FakeMediaStream([source]));
+  it('reports a venue connection failure while keeping IVS live', async () => {
+    const performanceNow = vi.spyOn(performance, 'now').mockReturnValue(100);
     venueAudio.start.mockRejectedValueOnce(new Error('STUN connection failed'));
     render(<MicSendPage />);
-    const toggle = screen.getByRole('switch', { name: '会場スピーカーにも送信' });
-    fireEvent.click(toggle);
+    fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
+    await screen.findByRole('button', { name: '送信停止' });
+    fireEvent.click(screen.getByRole('switch', { name: '会場スピーカーにも送信' }));
     expect(await screen.findByText(/会場音声: STUN connection failed/)).toBeInTheDocument();
-    expect(toggle).not.toBeChecked();
-    expect(clone.stop).toHaveBeenCalledOnce();
-    expect(listClientDiagnostics()).toMatchObject([{ source: 'venue.mic-send.start', message: 'STUN connection failed' }]);
+    expect(screen.getByRole('switch', { name: '会場スピーカーにも送信' })).not.toBeChecked();
+    expect(sessions[0]?.leave).not.toHaveBeenCalled();
+    await waitFor(() => expect(runLog.end).toHaveBeenCalledOnce());
+    const records = runLog.append.mock.calls.map(([, item]) => item as { type: string; event?: string; code?: string; message?: string; detail?: string; elapsedMs?: number });
+    expect(records.find((item) => item.type === 'error')).toMatchObject({ code: 'connection', message: 'STUN connection failed', elapsedMs: 0 });
+    expect(records.find((item) => item.type === 'transport' && item.event === 'stop')).toMatchObject({ detail: 'connection-error' });
+    expect(listClientDiagnostics().some((item) => item.source === 'venue.mic-send.start' && item.message === 'STUN connection failed')).toBe(true);
+    performanceNow.mockRestore();
   });
 
-  it('does not let a late venue startup failure reset a newer connection', async () => {
-    const source = new FakeTrack('audio');
-    getUserMedia.mockResolvedValueOnce(new FakeMediaStream([source]));
-    let rejectOldStart: (error: Error) => void = () => undefined;
-    const closeNew = vi.fn();
-    venueAudio.start
-      .mockImplementationOnce(() => new Promise((_, reject) => { rejectOldStart = reject; }))
-      .mockResolvedValueOnce({ close: closeNew, connected: Promise.resolve() });
+  it('does not start venue when it is switched off during capture', async () => {
+    let finish: (media: FakeMediaStream) => void = () => undefined;
+    getUserMedia.mockImplementationOnce(() => new Promise<FakeMediaStream>((resolve) => { finish = resolve; }));
     render(<MicSendPage />);
     const toggle = screen.getByRole('switch', { name: '会場スピーカーにも送信' });
     fireEvent.click(toggle);
-    await waitFor(() => expect(venueAudio.start).toHaveBeenCalledTimes(1));
-    const oldClone = source.clone.mock.results[0]?.value as FakeTrack;
     fireEvent.click(toggle);
-    fireEvent.click(toggle);
-    await waitFor(() => expect(venueAudio.start).toHaveBeenCalledTimes(2));
-    const newClone = source.clone.mock.results[1]?.value as FakeTrack;
-    await act(async () => rejectOldStart(new Error('late failure')));
-    expect(toggle).toBeChecked();
-    expect(screen.getByText(/会場音声: 接続中（DataChannel PCM）/)).toBeInTheDocument();
-    expect(oldClone.stop).toHaveBeenCalled();
-    fireEvent.click(toggle);
-    expect(closeNew).toHaveBeenCalledOnce();
-    expect(newClone.stop).toHaveBeenCalledOnce();
-  });
-
-  it('shows a fallback when venue startup rejects with a non-Error value', async () => {
-    venueAudio.start.mockRejectedValueOnce('unexpected failure');
-    render(<MicSendPage />);
-    fireEvent.click(screen.getByRole('switch', { name: '会場スピーカーにも送信' }));
-    expect(await screen.findByText(/会場音声: 接続に失敗しました/)).toBeInTheDocument();
-  });
-
-  it('closes the prepared audio context when microphone permission is denied', async () => {
-    const context = { close: vi.fn().mockResolvedValue(undefined) };
-    venueAudio.prepare.mockReturnValueOnce({ context, ready: Promise.resolve() });
-    getUserMedia.mockRejectedValueOnce(Object.assign(new Error('denied'), { name: 'NotAllowedError' }));
-    render(<MicSendPage />);
-    fireEvent.click(screen.getByRole('switch', { name: '会場スピーカーにも送信' }));
-    await waitFor(() => expect(screen.getByRole('switch', { name: '会場スピーカーにも送信' })).not.toBeChecked());
-    expect(screen.getByText(/会場音声: 停止/)).toBeInTheDocument();
-    expect(context.close).toHaveBeenCalledOnce();
-    expect(venueAudio.start).not.toHaveBeenCalled();
-  });
-
-  it('does not start venue audio when the switch is turned off while mic capture is pending', async () => {
-    let resolveCapture: (stream: FakeMediaStream) => void = () => undefined;
-    getUserMedia.mockImplementationOnce(() => new Promise<FakeMediaStream>((resolve) => { resolveCapture = resolve; }));
-    const context = { close: vi.fn().mockResolvedValue(undefined) };
-    venueAudio.prepare.mockReturnValueOnce({ context, ready: Promise.resolve() });
-    render(<MicSendPage />);
-    const toggle = screen.getByRole('switch', { name: '会場スピーカーにも送信' });
-    fireEvent.click(toggle);
-    await waitFor(() => expect(getUserMedia).toHaveBeenCalledOnce());
-    fireEvent.click(toggle);
-    await act(async () => resolveCapture(new FakeMediaStream([new FakeTrack('audio')])));
-    expect(context.close).toHaveBeenCalledOnce();
+    await act(async () => finish(new FakeMediaStream([new FakeTrack('audio')])));
     expect(venueAudio.start).not.toHaveBeenCalled();
     expect(toggle).not.toBeChecked();
-  });
-
-  it('reports missing audio input without starting venue transport', async () => {
-    getUserMedia.mockResolvedValueOnce(new FakeMediaStream([]));
-    render(<MicSendPage />);
-    const toggle = screen.getByRole('switch', { name: '会場スピーカーにも送信' });
-    fireEvent.click(toggle);
-    expect(await screen.findByText(/会場音声: マイク入力がありません/)).toBeInTheDocument();
-    expect(toggle).not.toBeChecked();
-    expect(venueAudio.start).not.toHaveBeenCalled();
-  });
-
-  it('does not start venue transport when the browser rejects low-latency clone settings', async () => {
-    const source = new FakeTrack('audio');
-    const clone = source.clone();
-    clone.applyConstraints.mockRejectedValueOnce(new Error('unsupported constraints'));
-    source.clone.mockReturnValueOnce(clone);
-    getUserMedia.mockResolvedValueOnce(new FakeMediaStream([source]));
-    render(<MicSendPage />);
-    const toggle = screen.getByRole('switch', { name: '会場スピーカーにも送信' });
-    fireEvent.click(toggle);
-    expect(await screen.findByText(/会場音声: unsupported constraints/)).toBeInTheDocument();
-    expect(clone.stop).toHaveBeenCalledOnce();
-    expect(toggle).not.toBeChecked();
-    expect(venueAudio.start).not.toHaveBeenCalled();
-  });
-
-  it('stops a low-latency clone that finishes setup after the switch is turned off', async () => {
-    const source = new FakeTrack('audio');
-    const clone = source.clone();
-    let finishConstraints: () => void = () => undefined;
-    clone.applyConstraints.mockImplementationOnce(async (constraints) => {
-      await new Promise<void>((resolve) => { finishConstraints = resolve; });
-      clone.appliedConstraints = constraints;
-    });
-    source.clone.mockReturnValueOnce(clone);
-    getUserMedia.mockResolvedValueOnce(new FakeMediaStream([source]));
-    render(<MicSendPage />);
-    const toggle = screen.getByRole('switch', { name: '会場スピーカーにも送信' });
-    fireEvent.click(toggle);
-    await waitFor(() => expect(clone.applyConstraints).toHaveBeenCalledOnce());
-    fireEvent.click(toggle);
-    await act(async () => finishConstraints());
-    expect(clone.stop).toHaveBeenCalledOnce();
-    expect(venueAudio.start).not.toHaveBeenCalled();
-  });
-
-  it('does not let an older connection cleanup stop tracking a newer venue clone', async () => {
-    const source = new FakeTrack('audio');
-    getUserMedia.mockResolvedValueOnce(new FakeMediaStream([source]));
-    let finishOldStart: (session: { close: ReturnType<typeof vi.fn>; connected: Promise<void> }) => void = () => undefined;
-    const closeOld = vi.fn();
-    const closeNew = vi.fn();
-    venueAudio.start
-      .mockImplementationOnce(() => new Promise((resolve) => { finishOldStart = resolve; }))
-      .mockResolvedValueOnce({ close: closeNew, connected: Promise.resolve() });
-    render(<MicSendPage />);
-    const toggle = screen.getByRole('switch', { name: '会場スピーカーにも送信' });
-    fireEvent.click(toggle);
-    await waitFor(() => expect(venueAudio.start).toHaveBeenCalledTimes(1));
-    const oldClone = source.clone.mock.results[0]?.value as FakeTrack;
-    fireEvent.click(toggle);
-    expect(oldClone.stop).toHaveBeenCalledOnce();
-    fireEvent.click(toggle);
-    await waitFor(() => expect(venueAudio.start).toHaveBeenCalledTimes(2));
-    const newClone = source.clone.mock.results[1]?.value as FakeTrack;
-    await act(async () => finishOldStart({ close: closeOld, connected: Promise.resolve() }));
-    expect(closeOld).toHaveBeenCalledOnce();
-    fireEvent.click(toggle);
-    expect(closeNew).toHaveBeenCalledOnce();
-    expect(newClone.stop).toHaveBeenCalledOnce();
   });
 
   it('closes a venue session that resolves after the switch was turned off', async () => {
@@ -358,47 +439,67 @@ describe('MicSendPage (S-02)', () => {
     expect(toggle).not.toBeChecked();
   });
 
-  it('keeps the stopped status when a venue connection completes after the switch is turned off', async () => {
-    let resolveConnected: () => void = () => undefined;
-    const close = vi.fn();
-    venueAudio.start.mockResolvedValueOnce({ close, connected: new Promise<void>((resolve) => { resolveConnected = resolve; }) });
+  it('ignores a stale venue connection failure after a newer session starts', async () => {
+    let rejectOld: (reason: Error) => void = () => undefined;
+    venueAudio.start
+      .mockImplementationOnce(() => new Promise((_, reject) => { rejectOld = reject; }))
+      .mockResolvedValueOnce({ close: vi.fn(), connected: Promise.resolve(), getMetrics: () => ({ slot: 1 }) });
     render(<MicSendPage />);
     const toggle = screen.getByRole('switch', { name: '会場スピーカーにも送信' });
     fireEvent.click(toggle);
     await waitFor(() => expect(venueAudio.start).toHaveBeenCalledOnce());
-    await waitFor(() => expect(close).not.toHaveBeenCalled());
     fireEvent.click(toggle);
-    expect(close).toHaveBeenCalledOnce();
-    await act(async () => resolveConnected());
+    fireEvent.click(toggle);
+    await waitFor(() => expect(venueAudio.start).toHaveBeenCalledTimes(2));
+    await act(async () => rejectOld(new Error('old route failed')));
+    expect(toggle).toBeChecked();
+    expect(screen.getByText(/会場音声: 接続中（DataChannel PCM）/)).toBeInTheDocument();
+    expect(listClientDiagnostics().some((item) => item.message === 'old route failed')).toBe(false);
+  });
+
+  it('does not report an intentional venue stop as a connection error', async () => {
+    let rejectConnected: (reason: Error) => void = () => undefined;
+    const connected = new Promise<void>((_, reject) => { rejectConnected = reject; });
+    venueAudio.start.mockResolvedValueOnce({
+      close: () => rejectConnected(new DOMException('closed', 'AbortError')),
+      connected, getMetrics: () => ({ slot: 1 }),
+    });
+    render(<MicSendPage />);
+    const toggle = screen.getByRole('switch', { name: '会場スピーカーにも送信' });
+    fireEvent.click(toggle);
+    await waitFor(() => expect(venueAudio.start).toHaveBeenCalledOnce());
+    fireEvent.click(toggle);
+    await act(async () => { await Promise.resolve(); });
+    expect(toggle).not.toBeChecked();
     expect(screen.getByText(/会場音声: 停止/)).toBeInTheDocument();
+    expect(listClientDiagnostics().some((item) => item.source === 'venue.mic-send.start')).toBe(false);
   });
 
-  it('sends audio as MIC1 and mutes on the sender side', async () => {
+  it('ends the venue run when its participant lease is lost', async () => {
     render(<MicSendPage />);
-    expect(screen.getByLabelText('入力レベル')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
-    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('送信中'));
-    expect(getUserMedia.mock.calls[0]?.[0]).toMatchObject({ video: false, audio: { sampleRate: 48000, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-    expect(api.requestStageTokens).toHaveBeenCalledWith('mic', 'MIC1', false);
-    expect(sessions[0]?.options.tracks[0]?.config).toEqual({ maxAudioBitrateKbps: 64 });
-    fireEvent.click(screen.getByRole('switch', { name: 'ミュート' }));
-    expect(sessions[0]?.setMuted).toHaveBeenLastCalledWith('audio', true);
-    expect(screen.getByText('ミュート中')).toBeInTheDocument();
+    const toggle = screen.getByRole('switch', { name: '会場スピーカーにも送信' });
+    fireEvent.click(toggle);
+    await waitFor(() => expect(venueAudio.start).toHaveBeenCalledOnce());
+    const options = venueAudio.start.mock.calls[0]?.[1] as { onLeaseLost: () => void };
+    act(() => options.onLeaseLost());
+    act(() => options.onLeaseLost());
+    expect(toggle).not.toBeChecked();
+    expect(screen.getByText(/会場接続が終了しました。再度開始してください/)).toBeInTheDocument();
+    await waitFor(() => expect(runLog.end).toHaveBeenCalledOnce());
+    const records = runLog.append.mock.calls.map(([, item]) => item as { type: string; event?: string; code?: string; detail?: string; message?: string });
+    expect(records.find((item) => item.type === 'error')).toMatchObject({ code: 'lease-lost', message: '会場接続の参加登録が失効しました' });
+    expect(records.filter((item) => item.type === 'error')).toHaveLength(1);
+    expect(records.find((item) => item.type === 'transport' && item.event === 'stop')).toMatchObject({ detail: 'lease-lost' });
+    expect(listClientDiagnostics().filter((item) => item.source === 'venue.mic-send.lease-lost')).toHaveLength(1);
+    expect(listClientDiagnostics().some((item) => item.source === 'venue.mic-send.lease-lost' && item.message === '会場接続の参加登録が失効しました')).toBe(true);
   });
 
-  it('does not start IVS when microphone capture fails', async () => {
-    getUserMedia.mockRejectedValueOnce(Object.assign(new Error('denied'), { name: 'NotAllowedError' }));
+  it('does not start IVS when capture has no audio track', async () => {
+    getUserMedia.mockResolvedValueOnce(new FakeMediaStream([]));
     render(<MicSendPage />);
     fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
-    await screen.findByRole('alert');
+    expect(await screen.findByText('マイク入力がありません')).toBeInTheDocument();
     expect(api.requestStageTokens).not.toHaveBeenCalled();
-  });
-
-  it('starts muted when muted before sending', async () => {
-    render(<MicSendPage />);
-    fireEvent.click(screen.getByRole('switch', { name: 'ミュート' }));
-    fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
-    await waitFor(() => expect(sessions[0]?.setMuted).toHaveBeenCalledWith('audio', true));
   });
 
   it('shows the 6th mic rejection (F-MIC-05)', async () => {
@@ -408,21 +509,11 @@ describe('MicSendPage (S-02)', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('マイクは最大5台まで接続できます');
   });
 
-  it('asks to pick another name when someone else uses it, not a network error (R3-01)', async () => {
+  it('asks for another name when another device uses it', async () => {
     api.requestStageTokens.mockRejectedValue(new ApiError(409, 'DEVICE_NAME_IN_USE', '使用中'));
     render(<MicSendPage />);
     fireEvent.click(screen.getByRole('button', { name: '送信開始' }));
-    const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('MIC1 は他の端末が使用中です。別の端末名を選んでください。');
-    expect(alert).not.toHaveTextContent('回線');
-    expect(screen.queryByRole('button', { name: 'この端末に切り替える' })).not.toBeInTheDocument();
-  });
-
-  it('keeps the first name when the in-use list cannot be fetched (R3-01)', async () => {
-    api.fetchDeviceNamesInUse.mockRejectedValue(new Error('offline'));
-    render(<MicSendPage />);
-    await waitFor(() => expect(api.fetchDeviceNamesInUse).toHaveBeenCalledWith('mic'));
-    expect(screen.getByRole('combobox', { name: '端末名' })).toHaveTextContent('MIC1');
+    expect(await screen.findByRole('alert')).toHaveTextContent('MIC1 は他の端末が使用中です');
   });
 });
 

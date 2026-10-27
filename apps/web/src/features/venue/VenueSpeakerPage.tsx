@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button';
 import { SenderShell } from '@/features/sender/components';
 import { prepareVenueSpeakerAudio, startVenueSpeaker, type PreparedVenueSpeakerAudio, type VenueSession, type VenueSessionMetrics, type VenueTransport } from './venueAudio';
 import { metricsValues, VenueRunControls } from './VenueMicPage';
+import { venueTrialId } from './venueTrial';
 import { holdWakeLock } from '@/lib/ivs/wakeLock';
 import { recordClientDiagnostic } from '@/lib/diagnostics';
 import {
@@ -108,14 +109,21 @@ export default function VenueSpeakerPage() {
       // `audio.ready` was started synchronously by the button's user gesture.
       await audio.ready;
       // The fixed runlog schema has no transport field; reserve a config marker in peers.
-      await createVenueRun({ id, startedAtUtc: nowUtc(), userAgent: navigator.userAgent, peers: [`config.transport=${transport}`] });
+      await createVenueRun({ id, startedAtUtc: nowUtc(), userAgent: navigator.userAgent, peers: [`config.transport=${transport}`, ...(venueTrialId() ? [`config.trialId=${venueTrialId()}`] : [])] });
       runRef.current = id;
       setRunIdValue(id);
       setActive(true);
       startMono.current = performance.now();
       addEvent('start', `transport=${transport}`);
       setStatus('マイク端末を待っています');
-      const current = await startVenueSpeaker(() => undefined, { transport, ...(slotChoice === 'auto' ? {} : { slot: slotChoice }) }, audio);
+      const current = await startVenueSpeaker(() => undefined, { transport, ...(slotChoice === 'auto' ? {} : { slot: slotChoice }), onLeaseLost: () => {
+        if (runRef.current !== id) return;
+        recordClientDiagnostic(new Error('会場スピーカーの参加登録が失効しました'), 'venue.speaker.lease-lost', { runId: id });
+        write(record('error', `error-${Date.now()}`, performance.now() - startMono.current, { code: 'lease-lost', message: '会場スピーカーの参加登録が失効しました' }));
+        stop();
+        setError('会場接続が終了しました。再度受信を開始してください。');
+        setStatus('エラー');
+      } }, audio);
       if (runRef.current !== id) { current.close(); return; }
       session.current = current;
       updateMetrics(current, id);
@@ -177,6 +185,7 @@ export default function VenueSpeakerPage() {
     </section>}
     {!active ? <Button className="h-11 w-full" onClick={() => void start(prepareVenueSpeakerAudio())}><MonitorPlay aria-hidden />受信開始</Button> : <Button variant="outline" className="h-11 w-full" onClick={stop}><Square aria-hidden />停止</Button>}
     <p className="text-sm text-muted-foreground">開始ボタンを押すと音声再生を有効化します。iPhone/iPad では消音モードを解除してください。音量は端末の音量ボタンで調整します。診断 RTT は片道音声遅延ではありません。</p>
+    <p className="text-sm text-muted-foreground">複数端末のログを照合する場合は、各端末の URL に同じ <code>?trialId=試験名</code> を付けてください。{venueTrialId() && <>現在の試験名: <code>{venueTrialId()}</code></>}</p>
     <VenueRunControls runId={runIdValue} slot={ownSlot} metrics={metrics} onFailure={setError} side="speaker" transport={transport} />
   </SenderShell>;
 }

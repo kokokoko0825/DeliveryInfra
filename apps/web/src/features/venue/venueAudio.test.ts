@@ -7,6 +7,7 @@ const api = vi.hoisted(() => ({
 vi.mock('@/lib/api', () => ({ apiFetch: api.fetch, ApiError: api.ApiError }));
 
 const { startVenueMic, startVenueSpeaker } = await import('./venueAudio');
+import type { PreparedVenueMicAudio } from './venueAudio';
 const { clearClientDiagnostics, listClientDiagnostics } = await import('@/lib/diagnostics');
 const STUN_URL = 'stun:stun.l.google.com:19302';
 
@@ -191,7 +192,130 @@ async function waitForLinks(count: number) {
   await vi.waitFor(() => expect(answers.size).toBe(count), { timeout: 3000, interval: 20 });
 }
 
+function sharedMicAudio(context: FakeAudioContext, ownsContext = false) {
+  const sibling = {} as AudioNode;
+  const edges = new Set<AudioNode>([sibling]);
+  const source = {
+    connect: vi.fn((target: AudioNode) => { edges.add(target); return target; }),
+    disconnect: vi.fn((target?: AudioNode) => { if (target) edges.delete(target); else edges.clear(); }),
+  };
+  const prepared: PreparedVenueMicAudio = {
+    context: context as unknown as AudioContext,
+    ready: Promise.resolve(),
+    source: source as unknown as MediaStreamAudioSourceNode,
+    ownsContext,
+  };
+  return { prepared, source, sibling, edges };
+}
+
 describe('venue room audio transport', () => {
+  it('keeps a shared context and a source sibling connected when the PCM mic stops', async () => {
+    const context = new FakeAudioContext();
+    const { prepared, source, sibling, edges } = sharedMicAudio(context);
+    const session = await startVenueMic({} as MediaStream, {}, prepared);
+    void session.connected.catch(() => undefined);
+    sessions.push(session);
+    expect(context.createMediaStreamSource).not.toHaveBeenCalled();
+    expect(source.connect).toHaveBeenCalledExactlyOnceWith(context.processor);
+    expect(edges.has(context.processor as unknown as AudioNode)).toBe(true);
+
+    session.close();
+    expect(source.disconnect).toHaveBeenCalledExactlyOnceWith(context.processor);
+    expect(edges.has(sibling)).toBe(true);
+    expect(edges.has(context.processor as unknown as AudioNode)).toBe(false);
+    expect(context.close).not.toHaveBeenCalled();
+  });
+
+  it('keeps a source sibling and shared context after PCM setup fails', async () => {
+    const context = new FakeAudioContext();
+    const { prepared, source, sibling, edges } = sharedMicAudio(context);
+    context.createGain.mockImplementationOnce(() => { throw new Error('gain setup failed'); });
+
+    await expect(startVenueMic({} as MediaStream, {}, prepared)).rejects.toThrow('gain setup failed');
+    expect(source.disconnect).toHaveBeenCalledExactlyOnceWith(context.processor);
+    expect(edges.has(sibling)).toBe(true);
+    expect(edges.has(context.processor as unknown as AudioNode)).toBe(false);
+    expect(context.close).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(participants).toHaveLength(0));
+  });
+
+  it('does not touch a shared source when setup fails before connecting it', async () => {
+    const context = new FakeAudioContext();
+    const { prepared, source, sibling, edges } = sharedMicAudio(context);
+    context.audioWorklet.addModule.mockRejectedValueOnce(new Error('worklet load failed'));
+
+    await expect(startVenueMic({} as MediaStream, {}, prepared)).rejects.toThrow('worklet load failed');
+    expect(source.connect).not.toHaveBeenCalled();
+    expect(source.disconnect).not.toHaveBeenCalled();
+    expect(edges.has(sibling)).toBe(true);
+    expect(context.close).not.toHaveBeenCalled();
+  });
+
+  it('preserves a shared source when connecting the PCM worklet fails', async () => {
+    const context = new FakeAudioContext();
+    const { prepared, source, sibling, edges } = sharedMicAudio(context);
+    source.connect.mockImplementationOnce(() => { throw new Error('worklet connect failed'); });
+
+    await expect(startVenueMic({} as MediaStream, {}, prepared)).rejects.toThrow('worklet connect failed');
+    expect(source.disconnect).not.toHaveBeenCalled();
+    expect(edges.has(sibling)).toBe(true);
+    expect(context.close).not.toHaveBeenCalled();
+  });
+
+  it('closes the legacy prepared and internally created mic contexts', async () => {
+    const preparedContext = new FakeAudioContext();
+    const prepared: PreparedVenueMicAudio = { context: preparedContext as unknown as AudioContext, ready: Promise.resolve() };
+    const preparedSession = await startVenueMic({} as MediaStream, {}, prepared);
+    void preparedSession.connected.catch(() => undefined);
+    sessions.push(preparedSession);
+    preparedSession.close();
+    expect(preparedContext.source.disconnect).not.toHaveBeenCalled();
+    expect(preparedContext.trackSources[0]!.disconnect).toHaveBeenCalledExactlyOnceWith(preparedContext.processor);
+    expect(preparedContext.close).toHaveBeenCalledTimes(1);
+
+    const ownSession = await joinMic();
+    const ownContext = contexts.at(-1)!;
+    ownSession.close();
+    expect(ownContext.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes a legacy prepared context after PCM setup fails', async () => {
+    const context = new FakeAudioContext();
+    context.audioWorklet.addModule.mockRejectedValueOnce(new Error('worklet load failed'));
+    const prepared: PreparedVenueMicAudio = { context: context as unknown as AudioContext, ready: Promise.resolve() };
+    await expect(startVenueMic({} as MediaStream, {}, prepared)).rejects.toThrow('worklet load failed');
+    expect(context.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves a registration error before creating an internal context', async () => {
+    api.fetch.mockRejectedValueOnce(new Error('registration unavailable'));
+    await expect(startVenueMic({} as MediaStream)).rejects.toThrow('registration unavailable');
+    expect(contexts).toHaveLength(0);
+  });
+
+  it('closes a legacy prepared context for audio-track transport', async () => {
+    const context = new FakeAudioContext();
+    const prepared: PreparedVenueMicAudio = { context: context as unknown as AudioContext, ready: Promise.resolve() };
+    const session = await startVenueMic({} as MediaStream, { transport: 'audio-track' }, prepared);
+    void session.connected.catch(() => undefined);
+    sessions.push(session);
+    expect(context.close).toHaveBeenCalledTimes(1);
+    session.close();
+    expect(context.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves a shared context alone for audio-track transport', async () => {
+    const context = new FakeAudioContext();
+    const { prepared, source } = sharedMicAudio(context);
+    const session = await startVenueMic({} as MediaStream, { transport: 'audio-track' }, prepared);
+    void session.connected.catch(() => undefined);
+    sessions.push(session);
+    session.close();
+    expect(context.close).not.toHaveBeenCalled();
+    expect(source.connect).not.toHaveBeenCalled();
+    expect(source.disconnect).not.toHaveBeenCalled();
+  });
+
   it('resumes the speaker AudioContext before waiting for signaling API calls', async () => {
     const pending = startVenueSpeaker(vi.fn());
     void pending.catch(() => undefined);
@@ -381,7 +505,8 @@ describe('venue room audio transport', () => {
 
   it('treats a missing participant lease as intentional close without an error diagnostic', async () => {
     vi.useFakeTimers();
-    const mic = await joinMic();
+    const onLeaseLost = vi.fn();
+    const mic = await startVenueMic({} as MediaStream, { onLeaseLost });
     const original = api.fetch.getMockImplementation()!;
     api.fetch.mockImplementation(async (path: string, options?: { method?: string; body?: unknown }) => {
       if ((options?.method ?? 'GET') === 'PATCH') throw new api.ApiError(404);
@@ -390,7 +515,9 @@ describe('venue room audio transport', () => {
     await vi.advanceTimersByTimeAsync(120_000);
     expect(listClientDiagnostics()).toEqual([]);
     expect(participants).toHaveLength(0);
+    expect(onLeaseLost).toHaveBeenCalledOnce();
     mic.close();
+    expect(onLeaseLost).toHaveBeenCalledOnce();
   });
 
   it('connects every mic to every speaker and removes its participant and peers on close', async () => {

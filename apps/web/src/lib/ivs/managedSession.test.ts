@@ -3,11 +3,11 @@ import type { StageSessionHandlers } from './stage';
 
 const fake = vi.hoisted(() => {
   const sessions: { token: string; handlers: StageSessionHandlers; options: { tracks: unknown[] }; join: ReturnType<typeof vi.fn>; leave: ReturnType<typeof vi.fn>; setPublishTracks: ReturnType<typeof vi.fn>; setMuted: ReturnType<typeof vi.fn>; getOutboundStats: ReturnType<typeof vi.fn> }[] = [];
-  return { sessions };
+  return { sessions, joinDeferred: null as Promise<void> | null };
 });
 vi.mock('./stage', () => ({
   createStageSession: vi.fn((token: string, options: { tracks: unknown[] }, handlers: StageSessionHandlers) => {
-    const session = { token, options, handlers, join: vi.fn().mockResolvedValue(undefined), leave: vi.fn(), setPublishTracks: vi.fn(), setMuted: vi.fn(), getOutboundStats: vi.fn().mockResolvedValue('report') };
+    const session = { token, options, handlers, join: vi.fn(() => fake.joinDeferred ?? Promise.resolve()), leave: vi.fn(), setPublishTracks: vi.fn(), setMuted: vi.fn(), getOutboundStats: vi.fn().mockResolvedValue('report') };
     fake.sessions.push(session);
     return session;
   }),
@@ -22,9 +22,79 @@ function scheduler() {
 const flush = async () => { for (let i = 0; i < 5; i += 1) await Promise.resolve(); };
 const track = { track: {} as MediaStreamTrack };
 
-beforeEach(() => { fake.sessions.length = 0; });
+beforeEach(() => { fake.sessions.length = 0; fake.joinDeferred = null; });
 
 describe('createManagedSession', () => {
+  it('uses an empty track list when no tracks are supplied', async () => {
+    const managed = createManagedSession({ fetchToken: vi.fn().mockResolvedValue('token'), publish: false, subscribe: true });
+    await managed.start();
+    expect(fake.sessions[0]?.options.tracks).toEqual([]);
+  });
+
+  it('can update tracks and mute before joining or after stopping', async () => {
+    const managed = createManagedSession({ fetchToken: vi.fn().mockResolvedValue('token'), publish: true, subscribe: false });
+    expect(() => { managed.setMuted(true); managed.setPublishTracks([track]); }).not.toThrow();
+    await managed.start();
+    expect(fake.sessions[0]?.options.tracks).toEqual([track]);
+    expect(fake.sessions[0]?.setMuted).toHaveBeenCalledWith('audio', true);
+    managed.stop();
+    expect(() => managed.setPublishTracks([])).not.toThrow();
+  });
+
+  it('handles loss and server ending without optional callbacks', async () => {
+    const { queue, scheduler: s } = scheduler();
+    const managed = createManagedSession({ fetchToken: vi.fn().mockResolvedValue('token'), publish: true, subscribe: false, scheduler: s });
+    await managed.start();
+    expect(() => fake.sessions[0]?.handlers.onRecoverableLoss?.('lost')).not.toThrow();
+    expect(queue).toHaveLength(1);
+    queue.shift()?.();
+    await flush();
+    expect(() => fake.sessions[1]?.handlers.onEnded?.('ended')).not.toThrow();
+  });
+
+  it('does not join after stop while token retrieval is pending', async () => {
+    let resolveToken: (token: string) => void = () => undefined;
+    const fetchToken = vi.fn(() => new Promise<string>((resolve) => { resolveToken = resolve; }));
+    const onStatus = vi.fn();
+    const managed = createManagedSession({ fetchToken, publish: true, subscribe: false, onStatus });
+    const starting = managed.start();
+    managed.stop();
+    resolveToken('late-token');
+    await starting;
+    expect(fake.sessions).toHaveLength(0);
+    expect(onStatus).toHaveBeenLastCalledWith('idle');
+  });
+
+  it('does not report connected after stop while joining', async () => {
+    let finishJoin: () => void = () => undefined;
+    fake.joinDeferred = new Promise<void>((resolve) => { finishJoin = resolve; });
+    const onStatus = vi.fn();
+    const managed = createManagedSession({ fetchToken: vi.fn().mockResolvedValue('token'), publish: true, subscribe: false, onStatus });
+    const starting = managed.start();
+    await flush();
+    managed.stop();
+    finishJoin();
+    await starting;
+    expect(onStatus).toHaveBeenLastCalledWith('idle');
+    expect(fake.sessions[0]?.leave).toHaveBeenCalled();
+  });
+
+  it('retries when the session is lost while its initial join is still pending', async () => {
+    const { queue, scheduler: s } = scheduler();
+    let finishJoin: () => void = () => undefined;
+    fake.joinDeferred = new Promise<void>((resolve) => { finishJoin = resolve; });
+    const managed = createManagedSession({ fetchToken: vi.fn().mockResolvedValue('token'), publish: true, subscribe: false, scheduler: s });
+    const starting = managed.start();
+    await flush();
+    fake.sessions[0]!.handlers.onRecoverableLoss?.('errored');
+    fake.joinDeferred = null;
+    finishJoin();
+    await starting;
+    expect(queue).toHaveLength(1);
+    queue.shift()?.();
+    await flush();
+    expect(fake.sessions).toHaveLength(2);
+  });
   it('fetches a token, joins, and reports status', async () => {
     const onStatus = vi.fn();
     const fetchToken = vi.fn().mockResolvedValue('t1');
@@ -70,6 +140,7 @@ describe('createManagedSession', () => {
     managed.setPublishTracks([track]);
     expect(fake.sessions[0]?.setPublishTracks).toHaveBeenCalledWith([track]);
     expect(fake.sessions[0]?.setMuted).toHaveBeenCalledTimes(2);
+    expect(fake.sessions[0]?.setMuted).toHaveBeenLastCalledWith('audio', true);
     managed.restart();
     queue.shift()?.();
     await flush();

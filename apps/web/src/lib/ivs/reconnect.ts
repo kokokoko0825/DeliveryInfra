@@ -11,13 +11,14 @@ export const realScheduler: Scheduler = {
 /**
  * 接続処理 connect を失敗時にバックオフ付きで繰り返す。
  * stop() 後は connect を呼ばない。成功で attempt をリセットする。
- * trigger() は待機中・接続中なら何もしない（切断イベントの重複通知を1回にまとめる）。
+ * trigger() は予約済みの再試行を重複させず、接続中なら完了後の再試行を予約する。
  */
 export function createReconnector(connect: () => Promise<void>, scheduler: Scheduler = realScheduler, delay: (attempt: number) => number = backoffMs) {
   let attempt = 0;
   let handle: unknown = null;
   let stopped = true;
   let running = false;
+  let retryAfterRun = false;
 
   const schedule = () => {
     if (stopped || running || handle !== null) return;
@@ -33,8 +34,13 @@ export function createReconnector(connect: () => Promise<void>, scheduler: Sched
       await connect();
       attempt = 0;
       running = false;
+      if (retryAfterRun && !stopped) {
+        retryAfterRun = false;
+        schedule();
+      }
     } catch (error) {
       running = false;
+      retryAfterRun = false;
       recordClientDiagnostic(error, 'ivs.reconnect', { retryAttempt: attempt });
       schedule();
       throw error;
@@ -46,12 +52,17 @@ export function createReconnector(connect: () => Promise<void>, scheduler: Sched
     start: () => {
       stopped = false;
       attempt = 0;
+      retryAfterRun = false;
       return run();
     },
     /** 切断を検知したときに呼ぶ。バックオフ後に再接続する。 */
-    trigger: schedule,
+    trigger: () => {
+      if (running) { retryAfterRun = true; return; }
+      schedule();
+    },
     stop: () => {
       stopped = true;
+      retryAfterRun = false;
       if (handle !== null) scheduler.clearTimeout(handle);
       handle = null;
     },
